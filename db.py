@@ -24,7 +24,7 @@ COL_KR_TO_DB = {
 COL_DB_TO_KR = {v: k for k, v in COL_KR_TO_DB.items()}
 
 
-@st.cache_resource
+@st.cache_resource(ttl=3600)
 def init_supabase():
     url = st.secrets["supabase"]["url"]
     key = st.secrets["supabase"]["key"]
