@@ -491,28 +491,39 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True
 )
 
-if uploaded_files and len(uploaded_files) >= 3:
+if uploaded_files and len(uploaded_files) >= 1:
     conv_df, power_ad_df, powerlink_df, match_info = classify_files(uploaded_files)
 
-    file_cols = st.columns(3)
-    labels = ['전환 리포트', '파워컨텐츠', '파워링크']
-    for i, label in enumerate(labels):
-        with file_cols[i]:
-            if match_info.get(label):
+    # 식별된 파일 표시
+    detected_labels = [l for l in ['전환 리포트', '파워컨텐츠', '파워링크'] if match_info.get(l)]
+    if detected_labels:
+        cols = st.columns(len(detected_labels))
+        for i, label in enumerate(detected_labels):
+            with cols[i]:
                 st.success(f"✅ {label}: {match_info[label]}")
-            else:
-                st.error(f"❌ {label}: 미식별")
+    if not conv_df:
+        st.caption("ℹ️ 전환 리포트 미업로드 — 전환 관련 지표(결제수, ROAS 등)는 0으로 표시됩니다.")
 
-    if conv_df is not None and power_ad_df is not None and powerlink_df is not None:
+    # 광고 파일이 하나라도 있으면 분석 진행
+    has_ad = power_ad_df is not None or powerlink_df is not None
+    if has_ad:
         period_str = f"{start_date.strftime('%Y.%m.%d')} ~ {end_date.strftime('%Y.%m.%d')}"
 
-        power_ad_clean = process_ad_data(power_ad_df)
-        powerlink_clean = process_ad_data(powerlink_df)
-        conv_powercont = process_conversion(conv_df, 'powercont')
-        conv_pl = process_conversion(conv_df, 'pl')
+        # 전환 데이터 처리 (없으면 빈 DataFrame)
+        empty_conv = pd.DataFrame(columns=['nt_keyword', '결제수', '결제금액', '결제금액(+14일기여도추정)', 'nt 클릭수'])
 
-        result_powercont = merge_and_calc(power_ad_clean, conv_powercont, period_str)
-        result_powerlink = merge_and_calc(powerlink_clean, conv_pl, period_str)
+        result_powercont = None
+        result_powerlink = None
+
+        if power_ad_df is not None:
+            power_ad_clean = process_ad_data(power_ad_df)
+            conv_powercont = process_conversion(conv_df, 'powercont') if conv_df is not None else empty_conv
+            result_powercont = merge_and_calc(power_ad_clean, conv_powercont, period_str)
+
+        if powerlink_df is not None:
+            powerlink_clean = process_ad_data(powerlink_df)
+            conv_pl = process_conversion(conv_df, 'pl') if conv_df is not None else empty_conv
+            result_powerlink = merge_and_calc(powerlink_clean, conv_pl, period_str)
 
         # ── 현재 분석 메모 session_state 초기화 ──
         if 'current_memos' not in st.session_state:
@@ -565,50 +576,50 @@ if uploaded_files and len(uploaded_files) >= 3:
             hide_zero = st.checkbox("총비용 0원 항목 숨기기", value=True)
         with ctrl_col2:
             if st.button("📥 주간 데이터 저장"):
-                # 현재 메모를 ad_type별로 분리하여 전달
                 pc_memos = {(p, kw): v for (p, kw, at), v in st.session_state['current_memos'].items() if at == '파워컨텐츠'}
                 pl_memos = {(p, kw): v for (p, kw, at), v in st.session_state['current_memos'].items() if at == '파워링크'}
-                save_weekly(result_powercont, '파워컨텐츠', memo_dict=pc_memos if pc_memos else None)
-                save_weekly(result_powerlink, '파워링크', memo_dict=pl_memos if pl_memos else None)
+                if result_powercont is not None:
+                    save_weekly(result_powercont, '파워컨텐츠', memo_dict=pc_memos if pc_memos else None)
+                if result_powerlink is not None:
+                    save_weekly(result_powerlink, '파워링크', memo_dict=pl_memos if pl_memos else None)
                 st.success(f"✅ [{period_str}] 주간 데이터가 저장되었습니다.")
 
-        display_pc = result_powercont[result_powercont['총비용'] > 0].copy() if hide_zero else result_powercont.copy()
-        display_pl = result_powerlink[result_powerlink['총비용'] > 0].copy() if hide_zero else result_powerlink.copy()
-
         # ── 성과 테이블: 파워컨텐츠 ──
-        st.subheader(f"📊 파워컨텐츠 성과 [{period_str}]")
-        fmt_pc = format_result(display_pc)
-        pc_memo_src = {(r['분석 기간'], r['keyword']): _get_current_memo(r['분석 기간'], r['keyword'], '파워컨텐츠')
-                       for _, r in display_pc.iterrows()}
-        fmt_pc = add_memo_column(fmt_pc, pc_memo_src)
-        styled_pc = fmt_pc.style.apply(lambda _: highlight_low_roas(fmt_pc, target_roas), axis=None)
-        st.caption("💡 행을 클릭하면 메모를 추가/조회할 수 있습니다")
-        ev_pc = st.dataframe(styled_pc, use_container_width=True, hide_index=True,
-                             on_select="rerun", selection_mode="single-row", key="df_pc")
-        if ev_pc.selection.rows:
-            idx = ev_pc.selection.rows[0]
-            row = display_pc.iloc[idx]
-            render_memo_panel(row['분석 기간'], row['keyword'], '파워컨텐츠', 'pc')
+        if result_powercont is not None:
+            display_pc = result_powercont[result_powercont['총비용'] > 0].copy() if hide_zero else result_powercont.copy()
+            st.subheader(f"📊 파워컨텐츠 성과 [{period_str}]")
+            fmt_pc = format_result(display_pc)
+            pc_memo_src = {(r['분석 기간'], r['keyword']): _get_current_memo(r['분석 기간'], r['keyword'], '파워컨텐츠')
+                           for _, r in display_pc.iterrows()}
+            fmt_pc = add_memo_column(fmt_pc, pc_memo_src)
+            styled_pc = fmt_pc.style.apply(lambda _: highlight_low_roas(fmt_pc, target_roas), axis=None)
+            st.caption("💡 행을 클릭하면 메모를 추가/조회할 수 있습니다")
+            ev_pc = st.dataframe(styled_pc, use_container_width=True, hide_index=True,
+                                 on_select="rerun", selection_mode="single-row", key="df_pc")
+            if ev_pc.selection.rows:
+                idx = ev_pc.selection.rows[0]
+                row = display_pc.iloc[idx]
+                render_memo_panel(row['분석 기간'], row['keyword'], '파워컨텐츠', 'pc')
 
         # ── 성과 테이블: 파워링크 ──
-        st.subheader(f"📊 파워링크 성과 [{period_str}]")
-        fmt_pl = format_result(display_pl)
-        pl_memo_src = {(r['분석 기간'], r['keyword']): _get_current_memo(r['분석 기간'], r['keyword'], '파워링크')
-                       for _, r in display_pl.iterrows()}
-        fmt_pl = add_memo_column(fmt_pl, pl_memo_src)
-        styled_pl = fmt_pl.style.apply(lambda _: highlight_low_roas(fmt_pl, target_roas), axis=None)
-        st.caption("💡 행을 클릭하면 메모를 추가/조회할 수 있습니다")
-        ev_pl = st.dataframe(styled_pl, use_container_width=True, hide_index=True,
-                             on_select="rerun", selection_mode="single-row", key="df_pl")
-        if ev_pl.selection.rows:
-            idx = ev_pl.selection.rows[0]
-            row = display_pl.iloc[idx]
-            render_memo_panel(row['분석 기간'], row['keyword'], '파워링크', 'pl')
+        if result_powerlink is not None:
+            display_pl = result_powerlink[result_powerlink['총비용'] > 0].copy() if hide_zero else result_powerlink.copy()
+            st.subheader(f"📊 파워링크 성과 [{period_str}]")
+            fmt_pl = format_result(display_pl)
+            pl_memo_src = {(r['분석 기간'], r['keyword']): _get_current_memo(r['분석 기간'], r['keyword'], '파워링크')
+                           for _, r in display_pl.iterrows()}
+            fmt_pl = add_memo_column(fmt_pl, pl_memo_src)
+            styled_pl = fmt_pl.style.apply(lambda _: highlight_low_roas(fmt_pl, target_roas), axis=None)
+            st.caption("💡 행을 클릭하면 메모를 추가/조회할 수 있습니다")
+            ev_pl = st.dataframe(styled_pl, use_container_width=True, hide_index=True,
+                                 on_select="rerun", selection_mode="single-row", key="df_pl")
+            if ev_pl.selection.rows:
+                idx = ev_pl.selection.rows[0]
+                row = display_pl.iloc[idx]
+                render_memo_panel(row['분석 기간'], row['keyword'], '파워링크', 'pl')
 
     else:
-        st.warning("파일 3개를 모두 식별하지 못했습니다. 파일 내용을 확인해주세요.")
-elif uploaded_files:
-    st.info(f"현재 {len(uploaded_files)}개 업로드됨 — 3개 파일을 모두 올려주세요.")
+        st.warning("광고 파일(파워컨텐츠 또는 파워링크)을 하나 이상 업로드해주세요.")
 else:
     st.info("엑셀/CSV 파일 3개를 한번에 드래그하여 업로드하세요.")
 
