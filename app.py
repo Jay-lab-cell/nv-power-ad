@@ -501,7 +501,7 @@ if uploaded_files and len(uploaded_files) >= 1:
         for i, label in enumerate(detected_labels):
             with cols[i]:
                 st.success(f"✅ {label}: {match_info[label]}")
-    if not conv_df:
+    if conv_df is None:
         st.caption("ℹ️ 전환 리포트 미업로드 — 전환 관련 지표(결제수, ROAS 등)는 0으로 표시됩니다.")
 
     # 광고 파일이 하나라도 있으면 분석 진행
