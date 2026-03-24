@@ -552,76 +552,94 @@ if uploaded_files and len(uploaded_files) >= 1:
             unmatched_pl = find_unmatched(powerlink_clean, conv_pl)
             result_powerlink = merge_and_calc(powerlink_clean, conv_pl, period_str)
 
-        # ── 키워드 매핑 UI ──
+        # ── 키워드 매핑 UI (항상 표시) ──
         total_unmatched = len(unmatched_pc) + len(unmatched_pl)
-        has_conv = conv_df is not None
-        # 미매칭이 있거나 저장된 매핑이 있으면 표시
-        if has_conv and (total_unmatched > 0 or len(all_mappings) > 0):
-            label = f"🔗 키워드 매핑 ({total_unmatched}개 미매칭)" if total_unmatched > 0 else "🔗 키워드 매핑"
-            with st.expander(label, expanded=(total_unmatched > 0)):
-                tab_unmatched, tab_saved = st.tabs(["미매칭 키워드", "저장된 매핑"])
+        label = f"🔗 키워드 매핑 ({total_unmatched}개 미매칭)" if total_unmatched > 0 else "🔗 키워드 매핑"
+        with st.expander(label, expanded=(total_unmatched > 0)):
+            tab_mapping, tab_saved = st.tabs(["키워드 매핑", "저장된 매핑"])
 
-                with tab_unmatched:
-                    if total_unmatched == 0:
-                        st.success("모든 키워드가 정상 매칭되었습니다.")
-                    else:
-                        # 사용 가능한 nt_keyword 목록
-                        all_nt_keywords = set()
-                        if power_ad_df is not None and conv_df is not None:
-                            all_nt_keywords.update(process_conversion(conv_df, 'powercont')['nt_keyword'].dropna().unique())
-                        if powerlink_df is not None and conv_df is not None:
-                            all_nt_keywords.update(process_conversion(conv_df, 'pl')['nt_keyword'].dropna().unique())
-                        nt_options = ["(선택안함)"] + sorted(all_nt_keywords)
+            with tab_mapping:
+                # 사용 가능한 nt_keyword 목록 수집
+                all_nt_keywords = set()
+                if conv_df is not None:
+                    if power_ad_df is not None:
+                        all_nt_keywords.update(process_conversion(conv_df, 'powercont')['nt_keyword'].dropna().unique())
+                    if powerlink_df is not None:
+                        all_nt_keywords.update(process_conversion(conv_df, 'pl')['nt_keyword'].dropna().unique())
+                nt_options = ["(선택안함)"] + sorted(all_nt_keywords)
 
-                        mapping_selections = {}
+                # 모든 광고그룹 목록 구성 (총비용 > 0)
+                all_ad_groups = []
+                if power_ad_df is not None:
+                    for _, row in power_ad_clean[power_ad_clean['총비용'] > 0].drop_duplicates(subset='광고그룹 이름').iterrows():
+                        is_unmatched = row['광고그룹 이름'] in unmatched_pc['광고그룹 이름'].values if len(unmatched_pc) > 0 else False
+                        all_ad_groups.append(('파워컨텐츠', row['광고그룹 이름'], row['keyword'], int(row['총비용']), is_unmatched))
+                if powerlink_df is not None:
+                    for _, row in powerlink_clean[powerlink_clean['총비용'] > 0].drop_duplicates(subset='광고그룹 이름').iterrows():
+                        is_unmatched = row['광고그룹 이름'] in unmatched_pl['광고그룹 이름'].values if len(unmatched_pl) > 0 else False
+                        all_ad_groups.append(('파워링크', row['광고그룹 이름'], row['keyword'], int(row['총비용']), is_unmatched))
 
-                        for ad_type_label, unmatched_df in [('파워컨텐츠', unmatched_pc), ('파워링크', unmatched_pl)]:
-                            if len(unmatched_df) == 0:
-                                continue
+                if not all_ad_groups:
+                    st.caption("광고 데이터가 없습니다.")
+                elif not all_nt_keywords:
+                    st.caption("ℹ️ 전환 리포트를 업로드하면 nt_keyword를 선택할 수 있습니다.")
+                else:
+                    # 미매칭 항목을 상단에 배치
+                    all_ad_groups.sort(key=lambda x: (not x[4], x[0], -x[3]))
+
+                    mapping_selections = {}
+                    current_type = None
+                    for ad_type_label, ag_name, kw, cost, is_unmatched in all_ad_groups:
+                        if ad_type_label != current_type:
+                            current_type = ad_type_label
                             st.markdown(f"**{ad_type_label}**")
-                            for _, row in unmatched_df.iterrows():
-                                c1, c2, c3, c4 = st.columns([3, 2, 1, 3])
-                                with c1:
-                                    st.text(row['광고그룹 이름'][:40])
-                                with c2:
-                                    st.text(f"추출: {row['keyword'] or '없음'}")
-                                with c3:
-                                    st.text(f"₩{int(row['총비용']):,}")
-                                with c4:
-                                    sel = st.selectbox(
-                                        "nt_keyword",
-                                        nt_options,
-                                        key=f"map_{ad_type_label}_{row['광고그룹 이름']}",
-                                        label_visibility="collapsed"
-                                    )
-                                    if sel != "(선택안함)":
-                                        mapping_selections[(row['광고그룹 이름'], ad_type_label)] = sel
+                        marker = "⚠️ " if is_unmatched else ""
+                        c1, c2, c3, c4 = st.columns([3, 2, 1, 3])
+                        with c1:
+                            st.text(f"{marker}{ag_name[:38]}")
+                        with c2:
+                            st.text(f"추출: {kw or '없음'}")
+                        with c3:
+                            st.text(f"₩{cost:,}")
+                        with c4:
+                            # 이미 저장된 매핑이 있으면 기본값으로 설정
+                            saved = all_mappings.get((ag_name, ad_type_label))
+                            default_idx = nt_options.index(saved) if saved and saved in nt_options else 0
+                            sel = st.selectbox(
+                                "nt_keyword",
+                                nt_options,
+                                index=default_idx,
+                                key=f"map_{ad_type_label}_{ag_name}",
+                                label_visibility="collapsed"
+                            )
+                            if sel != "(선택안함)":
+                                mapping_selections[(ag_name, ad_type_label)] = sel
 
-                        if st.button("💾 매핑 저장", key="save_mappings"):
-                            if mapping_selections:
-                                for (ag_name, at), nt_kw in mapping_selections.items():
-                                    db_save_keyword_mapping(user_id, ag_name, at, nt_kw)
-                                st.success(f"{len(mapping_selections)}건 매핑 저장 완료")
+                    if st.button("💾 매핑 저장", key="save_mappings"):
+                        if mapping_selections:
+                            for (ag_name, at), nt_kw in mapping_selections.items():
+                                db_save_keyword_mapping(user_id, ag_name, at, nt_kw)
+                            st.success(f"{len(mapping_selections)}건 매핑 저장 완료")
+                            st.rerun()
+                        else:
+                            st.warning("매핑할 항목을 선택해주세요.")
+
+            with tab_saved:
+                if not all_mappings:
+                    st.caption("저장된 매핑이 없습니다.")
+                else:
+                    for (ag_name, at), nt_kw in all_mappings.items():
+                        c1, c2, c3, c4 = st.columns([3, 3, 1, 1])
+                        with c1:
+                            st.text(ag_name[:40])
+                        with c2:
+                            st.text(f"→ {nt_kw}")
+                        with c3:
+                            st.caption(at)
+                        with c4:
+                            if st.button("🗑", key=f"del_map_{at}_{ag_name}", help="매핑 삭제"):
+                                db_delete_keyword_mapping(user_id, ag_name, at)
                                 st.rerun()
-                            else:
-                                st.warning("매핑할 항목을 선택해주세요.")
-
-                with tab_saved:
-                    if not all_mappings:
-                        st.caption("저장된 매핑이 없습니다.")
-                    else:
-                        for (ag_name, at), nt_kw in all_mappings.items():
-                            c1, c2, c3, c4 = st.columns([3, 3, 1, 1])
-                            with c1:
-                                st.text(ag_name[:40])
-                            with c2:
-                                st.text(f"→ {nt_kw}")
-                            with c3:
-                                st.caption(at)
-                            with c4:
-                                if st.button("🗑", key=f"del_map_{at}_{ag_name}", help="매핑 삭제"):
-                                    db_delete_keyword_mapping(user_id, ag_name, at)
-                                    st.rerun()
 
         # ── 현재 분석 메모 session_state 초기화 ──
         if 'current_memos' not in st.session_state:
