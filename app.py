@@ -618,14 +618,34 @@ if uploaded_files and len(uploaded_files) >= 1:
             tab_mapping, tab_saved = st.tabs(["키워드 매핑", "저장된 매핑"])
 
             with tab_mapping:
-                # 사용 가능한 nt_keyword 목록 수집
+                # 사용 가능한 nt_keyword 목록 수집 (매칭 기준에 따라 다름)
                 all_nt_keywords = set()
+                pc_nt_keywords = set()
+                pl_nt_keywords = set()
                 if conv_df is not None:
-                    all_nt_keywords.update(conv_df['nt_keyword'].dropna().unique())
+                    if conv_match_by == 'medium':
+                        # medium 모드: 해당 medium에 속한 keyword만 표시
+                        pc_filtered = conv_df[conv_df['nt_medium'] == 'powercont']
+                        if len(pc_filtered) == 0:
+                            pc_filtered = conv_df
+                        pc_nt_keywords.update(pc_filtered['nt_keyword'].dropna().unique())
+                        pl_filtered = conv_df[conv_df['nt_medium'] == 'pl']
+                        if len(pl_filtered) == 0:
+                            pl_filtered = conv_df
+                        pl_nt_keywords.update(pl_filtered['nt_keyword'].dropna().unique())
+                    else:
+                        # keyword 모드: 전체 nt_keyword 표시
+                        all_kws = set(conv_df['nt_keyword'].dropna().unique())
+                        pc_nt_keywords.update(all_kws)
+                        pl_nt_keywords.update(all_kws)
+                all_nt_keywords = pc_nt_keywords | pl_nt_keywords
                 # 저장된 매핑에서도 키워드 추가 (전환 파일 없어도 기존 매핑 표시)
-                for kw_list in all_mappings.values():
+                for (ag, at), kw_list in all_mappings.items():
                     all_nt_keywords.update(kw_list)
-                nt_options_sorted = sorted(all_nt_keywords)
+                    if at == '파워컨텐츠':
+                        pc_nt_keywords.update(kw_list)
+                    else:
+                        pl_nt_keywords.update(kw_list)
 
                 # 모든 광고그룹 목록 구성 (총비용 > 0)
                 all_ad_groups = []
@@ -661,11 +681,12 @@ if uploaded_files and len(uploaded_files) >= 1:
                         with c3:
                             st.text(f"₩{cost:,}")
                         with c4:
+                            type_kws = pc_nt_keywords if ad_type_label == '파워컨텐츠' else pl_nt_keywords
                             saved = all_mappings.get((ag_name, ad_type_label), [])
-                            default = [k for k in saved if k in all_nt_keywords]
+                            default = [k for k in saved if k in type_kws]
                             sel = st.multiselect(
                                 "nt_keyword",
-                                nt_options_sorted,
+                                sorted(type_kws),
                                 default=default,
                                 key=f"map_{ad_type_label}_{ag_name}",
                                 label_visibility="collapsed"
