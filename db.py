@@ -169,3 +169,33 @@ def db_set_memo(user_id, period, keyword, ad_type, memo_str):
         'user_id', user_id
     ).eq('analysis_period', period).eq('keyword', keyword).eq('ad_type', ad_type).execute()
     return True
+
+
+# ── 키워드 매핑 CRUD ──
+
+def db_load_keyword_mappings(user_id):
+    """사용자의 키워드 매핑 전체 로드. {(ad_group_name, ad_type): mapped_nt_keyword}"""
+    sb = init_supabase()
+    result = sb.table('keyword_mappings').select(
+        'ad_group_name,ad_type,mapped_nt_keyword'
+    ).eq('user_id', user_id).execute()
+    return {(r['ad_group_name'], r['ad_type']): r['mapped_nt_keyword'] for r in result.data}
+
+
+def db_save_keyword_mapping(user_id, ad_group_name, ad_type, mapped_nt_keyword):
+    """키워드 매핑 1건 저장 (UPSERT)."""
+    sb = init_supabase()
+    sb.table('keyword_mappings').upsert({
+        'user_id': user_id,
+        'ad_group_name': ad_group_name,
+        'ad_type': ad_type,
+        'mapped_nt_keyword': mapped_nt_keyword,
+    }, on_conflict='user_id,ad_group_name,ad_type').execute()
+
+
+def db_delete_keyword_mapping(user_id, ad_group_name, ad_type):
+    """키워드 매핑 삭제."""
+    sb = init_supabase()
+    sb.table('keyword_mappings').delete().eq(
+        'user_id', user_id
+    ).eq('ad_group_name', ad_group_name).eq('ad_type', ad_type).execute()
