@@ -559,13 +559,10 @@ if uploaded_files and len(uploaded_files) >= 1:
             tab_mapping, tab_saved = st.tabs(["키워드 매핑", "저장된 매핑"])
 
             with tab_mapping:
-                # 사용 가능한 nt_keyword 목록 수집
+                # 사용 가능한 nt_keyword 목록 수집 (전환 리포트의 모든 nt_keyword)
                 all_nt_keywords = set()
                 if conv_df is not None:
-                    if power_ad_df is not None:
-                        all_nt_keywords.update(process_conversion(conv_df, 'powercont')['nt_keyword'].dropna().unique())
-                    if powerlink_df is not None:
-                        all_nt_keywords.update(process_conversion(conv_df, 'pl')['nt_keyword'].dropna().unique())
+                    all_nt_keywords.update(conv_df['nt_keyword'].dropna().unique())
                 nt_options = ["(선택안함)"] + sorted(all_nt_keywords)
 
                 # 모든 광고그룹 목록 구성 (총비용 > 0)
