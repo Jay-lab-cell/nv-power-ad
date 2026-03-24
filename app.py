@@ -155,6 +155,36 @@ def process_conversion(conv_df, medium):
     return grouped
 
 
+def aggregate_mapped_conversions(conv_grouped, mappings_multi):
+    """다중 매핑된 nt_keyword들의 전환 데이터를 합산.
+    mappings_multi: {ad_group_name: [kw1, kw2, ...]} (2개 이상만)
+    첫 번째 keyword를 primary key로 사용."""
+    if conv_grouped is None or len(conv_grouped) == 0 or not mappings_multi:
+        return conv_grouped
+
+    extra_rows = []
+    all_aggregated_kws = set()
+    for ag_name, kw_list in mappings_multi.items():
+        if len(kw_list) <= 1:
+            continue
+        primary = kw_list[0]
+        matched = conv_grouped[conv_grouped['nt_keyword'].isin(kw_list)]
+        if len(matched) == 0:
+            continue
+        summed = matched.select_dtypes(include='number').sum()
+        new_row = {'nt_keyword': primary}
+        new_row.update(summed.to_dict())
+        extra_rows.append(new_row)
+        all_aggregated_kws.update(kw_list)
+
+    if not extra_rows:
+        return conv_grouped
+
+    result = conv_grouped[~conv_grouped['nt_keyword'].isin(all_aggregated_kws)].copy()
+    extra_df = pd.DataFrame(extra_rows)
+    return pd.concat([result, extra_df], ignore_index=True)
+
+
 def merge_and_calc(ad_df, conv_grouped, period_str):
     merged = ad_df.merge(conv_grouped, left_on='keyword', right_on='nt_keyword', how='left')
     for col in ['결제수', '결제금액', '결제금액(+14일기여도추정)', 'nt 클릭수']:
@@ -533,10 +563,14 @@ if uploaded_files and len(uploaded_files) >= 1:
         # 전환 데이터 처리 (없으면 빈 DataFrame)
         empty_conv = pd.DataFrame(columns=['nt_keyword', '결제수', '결제금액', '결제금액(+14일기여도추정)', 'nt 클릭수'])
 
-        # 저장된 키워드 매핑 로드
+        # 저장된 키워드 매핑 로드 (리스트 형태)
         all_mappings = db_load_keyword_mappings(user_id)
-        pc_mappings = {name: kw for (name, at), kw in all_mappings.items() if at == '파워컨텐츠'}
-        pl_mappings = {name: kw for (name, at), kw in all_mappings.items() if at == '파워링크'}
+        # 단일값 매핑 (process_ad_data용: 첫 번째 키워드)
+        pc_mappings = {name: kw_list[0] for (name, at), kw_list in all_mappings.items() if at == '파워컨텐츠' and kw_list}
+        pl_mappings = {name: kw_list[0] for (name, at), kw_list in all_mappings.items() if at == '파워링크' and kw_list}
+        # 다중값 매핑 (전환 합산용)
+        pc_multi = {name: kw_list for (name, at), kw_list in all_mappings.items() if at == '파워컨텐츠' and len(kw_list) > 1}
+        pl_multi = {name: kw_list for (name, at), kw_list in all_mappings.items() if at == '파워링크' and len(kw_list) > 1}
 
         result_powercont = None
         result_powerlink = None
@@ -546,12 +580,14 @@ if uploaded_files and len(uploaded_files) >= 1:
         if power_ad_df is not None:
             power_ad_clean = process_ad_data(power_ad_df, keyword_mappings=pc_mappings)
             conv_powercont = process_conversion(conv_df, 'powercont') if conv_df is not None else empty_conv
+            conv_powercont = aggregate_mapped_conversions(conv_powercont, pc_multi)
             unmatched_pc = find_unmatched(power_ad_clean, conv_powercont)
             result_powercont = merge_and_calc(power_ad_clean, conv_powercont, period_str)
 
         if powerlink_df is not None:
             powerlink_clean = process_ad_data(powerlink_df, keyword_mappings=pl_mappings)
             conv_pl = process_conversion(conv_df, 'pl') if conv_df is not None else empty_conv
+            conv_pl = aggregate_mapped_conversions(conv_pl, pl_multi)
             unmatched_pl = find_unmatched(powerlink_clean, conv_pl)
             result_powerlink = merge_and_calc(powerlink_clean, conv_pl, period_str)
 
@@ -562,11 +598,14 @@ if uploaded_files and len(uploaded_files) >= 1:
             tab_mapping, tab_saved = st.tabs(["키워드 매핑", "저장된 매핑"])
 
             with tab_mapping:
-                # 사용 가능한 nt_keyword 목록 수집 (전환 리포트의 모든 nt_keyword)
+                # 사용 가능한 nt_keyword 목록 수집
                 all_nt_keywords = set()
                 if conv_df is not None:
                     all_nt_keywords.update(conv_df['nt_keyword'].dropna().unique())
-                nt_options = ["(선택안함)"] + sorted(all_nt_keywords)
+                # 저장된 매핑에서도 키워드 추가 (전환 파일 없어도 기존 매핑 표시)
+                for kw_list in all_mappings.values():
+                    all_nt_keywords.update(kw_list)
+                nt_options_sorted = sorted(all_nt_keywords)
 
                 # 모든 광고그룹 목록 구성 (총비용 > 0)
                 all_ad_groups = []
@@ -602,23 +641,22 @@ if uploaded_files and len(uploaded_files) >= 1:
                         with c3:
                             st.text(f"₩{cost:,}")
                         with c4:
-                            # 이미 저장된 매핑이 있으면 기본값으로 설정
-                            saved = all_mappings.get((ag_name, ad_type_label))
-                            default_idx = nt_options.index(saved) if saved and saved in nt_options else 0
-                            sel = st.selectbox(
+                            saved = all_mappings.get((ag_name, ad_type_label), [])
+                            default = [k for k in saved if k in all_nt_keywords]
+                            sel = st.multiselect(
                                 "nt_keyword",
-                                nt_options,
-                                index=default_idx,
+                                nt_options_sorted,
+                                default=default,
                                 key=f"map_{ad_type_label}_{ag_name}",
                                 label_visibility="collapsed"
                             )
-                            if sel != "(선택안함)":
+                            if sel:
                                 mapping_selections[(ag_name, ad_type_label)] = sel
 
                     if st.button("💾 매핑 저장", key="save_mappings"):
                         if mapping_selections:
-                            for (ag_name, at), nt_kw in mapping_selections.items():
-                                db_save_keyword_mapping(user_id, ag_name, at, nt_kw)
+                            for (ag_name, at), nt_kw_list in mapping_selections.items():
+                                db_save_keyword_mapping(user_id, ag_name, at, nt_kw_list)
                             st.success(f"{len(mapping_selections)}건 매핑 저장 완료")
                             st.rerun()
                         else:
@@ -628,12 +666,12 @@ if uploaded_files and len(uploaded_files) >= 1:
                 if not all_mappings:
                     st.caption("저장된 매핑이 없습니다.")
                 else:
-                    for (ag_name, at), nt_kw in all_mappings.items():
+                    for (ag_name, at), kw_list in all_mappings.items():
                         c1, c2, c3, c4 = st.columns([3, 3, 1, 1])
                         with c1:
                             st.text(ag_name[:40])
                         with c2:
-                            st.text(f"→ {nt_kw}")
+                            st.text(f"→ {', '.join(kw_list)}")
                         with c3:
                             st.caption(at)
                         with c4:
