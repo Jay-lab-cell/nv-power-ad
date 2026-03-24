@@ -42,12 +42,23 @@ def get_user_id():
 def _df_to_records(df, user_id, ad_type, memo_dict=None):
     """DataFrame을 Supabase insert용 dict 리스트로 변환."""
     records = []
+    seen_keys = set()
     for _, r in df.iterrows():
+        kw = str(r.get('keyword', '')) if pd.notna(r.get('keyword')) else ''
+        # keyword가 비어있으면 광고그룹 이름을 keyword로 사용
+        if not kw.strip():
+            kw = str(r.get('광고그룹 이름', ''))
+        period = str(r.get('분석 기간', ''))
+        # 중복 키 방지
+        ukey = (period, kw, ad_type)
+        if ukey in seen_keys:
+            continue
+        seen_keys.add(ukey)
         rec = {
             'user_id': user_id,
-            'analysis_period': str(r.get('분석 기간', '')),
+            'analysis_period': period,
             'ad_group_name': str(r.get('광고그룹 이름', '')),
-            'keyword': str(r.get('keyword', '')),
+            'keyword': kw,
             'total_cost': int(r.get('총비용', 0)),
             'avg_cpc': int(r.get('평균CPC', 0)),
             'clicks': int(r.get('클릭수', 0)),
