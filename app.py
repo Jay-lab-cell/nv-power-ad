@@ -804,8 +804,7 @@ if history is not None and len(history) > 0:
             # ── 테이블: 키워드 선택 바로 아래 ──
             st.markdown("#### 주차별 상세 데이터")
             display_hist = chart_data.sort_values(['분석 기간', '총비용'], ascending=[True, False])
-            drop_cols = [c for c in ['ROAS_14일(%)', '결제금액(+14일기여도추정)'] if c in display_hist.columns]
-            display_hist = display_hist.drop(columns=drop_cols)
+            # 14일 기여도 컬럼 유지 (결제금액(+14일기여도추정), ROAS_14일(%))
             fmt_hist = format_history(display_hist)
             # 메모 열: 이미 CSV에 있는 메모 표시
             hist_memo_src = {}
