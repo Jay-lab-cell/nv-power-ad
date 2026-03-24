@@ -161,21 +161,27 @@ def aggregate_mapped_conversions(conv_grouped, mappings_multi):
     첫 번째 keyword를 primary key로 사용."""
     if conv_grouped is None or len(conv_grouped) == 0 or not mappings_multi:
         return conv_grouped
+    if 'nt_keyword' not in conv_grouped.columns:
+        return conv_grouped
 
     extra_rows = []
-    all_aggregated_kws = set()
+    all_aggregated_kws = []
     for ag_name, kw_list in mappings_multi.items():
         if len(kw_list) <= 1:
             continue
         primary = kw_list[0]
-        matched = conv_grouped[conv_grouped['nt_keyword'].isin(kw_list)]
+        matched = conv_grouped[conv_grouped['nt_keyword'].isin(list(kw_list))]
         if len(matched) == 0:
             continue
-        summed = matched.select_dtypes(include='number').sum()
+        num_cols = matched.select_dtypes(include='number')
+        if len(num_cols.columns) > 0:
+            summed = num_cols.sum().to_dict()
+        else:
+            summed = {}
         new_row = {'nt_keyword': primary}
-        new_row.update(summed.to_dict())
+        new_row.update(summed)
         extra_rows.append(new_row)
-        all_aggregated_kws.update(kw_list)
+        all_aggregated_kws.extend(kw_list)
 
     if not extra_rows:
         return conv_grouped
