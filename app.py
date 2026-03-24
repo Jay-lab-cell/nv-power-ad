@@ -135,10 +135,13 @@ def find_unmatched(ad_df, conv_grouped):
     return unmatched[['광고그룹 이름', 'keyword', '총비용']].drop_duplicates(subset='광고그룹 이름')
 
 
-def process_conversion(conv_df, medium):
-    filtered = conv_df[conv_df['nt_medium'] == medium].copy()
-    # medium 필터 결과가 비어있으면 전체 데이터로 fallback
-    if len(filtered) == 0:
+def process_conversion(conv_df, medium, match_by='medium'):
+    if match_by == 'medium':
+        filtered = conv_df[conv_df['nt_medium'] == medium].copy()
+        if len(filtered) == 0:
+            filtered = conv_df.copy()
+    else:
+        # keyword 기준: medium 필터 없이 전체 전환 데이터 사용
         filtered = conv_df.copy()
     agg_dict = {
         '결제수': 'sum',
@@ -566,6 +569,17 @@ if uploaded_files and len(uploaded_files) >= 1:
     if has_ad:
         period_str = f"{start_date.strftime('%Y.%m.%d')} ~ {end_date.strftime('%Y.%m.%d')}"
 
+        # 전환 매칭 기준 선택
+        conv_match_by = 'medium'
+        if conv_df is not None:
+            conv_match_by = st.radio(
+                "전환 매칭 기준",
+                ["medium", "keyword"],
+                horizontal=True,
+                key="conv_match_by",
+                help="medium: nt_medium(powercont/pl)으로 필터 후 keyword 매칭 | keyword: medium 무시하고 nt_keyword로만 매칭"
+            )
+
         # 전환 데이터 처리 (없으면 빈 DataFrame)
         empty_conv = pd.DataFrame(columns=['nt_keyword', '결제수', '결제금액', '결제금액(+14일기여도추정)', 'nt 클릭수'])
 
@@ -585,14 +599,14 @@ if uploaded_files and len(uploaded_files) >= 1:
 
         if power_ad_df is not None:
             power_ad_clean = process_ad_data(power_ad_df, keyword_mappings=pc_mappings)
-            conv_powercont = process_conversion(conv_df, 'powercont') if conv_df is not None else empty_conv
+            conv_powercont = process_conversion(conv_df, 'powercont', match_by=conv_match_by) if conv_df is not None else empty_conv
             conv_powercont = aggregate_mapped_conversions(conv_powercont, pc_multi)
             unmatched_pc = find_unmatched(power_ad_clean, conv_powercont)
             result_powercont = merge_and_calc(power_ad_clean, conv_powercont, period_str)
 
         if powerlink_df is not None:
             powerlink_clean = process_ad_data(powerlink_df, keyword_mappings=pl_mappings)
-            conv_pl = process_conversion(conv_df, 'pl') if conv_df is not None else empty_conv
+            conv_pl = process_conversion(conv_df, 'pl', match_by=conv_match_by) if conv_df is not None else empty_conv
             conv_pl = aggregate_mapped_conversions(conv_pl, pl_multi)
             unmatched_pl = find_unmatched(powerlink_clean, conv_pl)
             result_powerlink = merge_and_calc(powerlink_clean, conv_pl, period_str)
