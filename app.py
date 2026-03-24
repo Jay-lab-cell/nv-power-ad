@@ -137,6 +137,9 @@ def find_unmatched(ad_df, conv_grouped):
 
 def process_conversion(conv_df, medium):
     filtered = conv_df[conv_df['nt_medium'] == medium].copy()
+    # medium 필터 결과가 비어있으면 전체 데이터로 fallback
+    if len(filtered) == 0:
+        filtered = conv_df.copy()
     agg_dict = {
         '결제수': 'sum',
         '결제금액': 'sum',
