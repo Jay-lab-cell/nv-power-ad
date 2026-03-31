@@ -174,28 +174,35 @@ def db_set_memo(user_id, period, keyword, ad_type, memo_str):
 # ── 키워드 매핑 CRUD ──
 
 def db_load_keyword_mappings(user_id):
-    """사용자의 키워드 매핑 전체 로드. {(ad_group_name, ad_type): [kw1, kw2, ...]}"""
+    """사용자의 키워드 매핑 전체 로드.
+    반환: {(ad_group_name, ad_type): {'medium': [...], 'keyword': [...]}}
+    """
     sb = init_supabase()
     result = sb.table('keyword_mappings').select(
-        'ad_group_name,ad_type,mapped_nt_keyword'
+        'ad_group_name,ad_type,mapped_nt_keyword,mapped_nt_medium'
     ).eq('user_id', user_id).execute()
     mappings = {}
     for r in result.data:
-        raw = r['mapped_nt_keyword'] or ''
-        kw_list = [k.strip() for k in raw.split(',') if k.strip()]
-        mappings[(r['ad_group_name'], r['ad_type'])] = kw_list
+        kw_raw = r.get('mapped_nt_keyword') or ''
+        med_raw = r.get('mapped_nt_medium') or ''
+        kw_list = [k.strip() for k in kw_raw.split(',') if k.strip()]
+        med_list = [m.strip() for m in med_raw.split(',') if m.strip()]
+        mappings[(r['ad_group_name'], r['ad_type'])] = {
+            'medium': med_list,
+            'keyword': kw_list,
+        }
     return mappings
 
 
-def db_save_keyword_mapping(user_id, ad_group_name, ad_type, mapped_nt_keywords):
-    """키워드 매핑 1건 저장 (UPSERT). mapped_nt_keywords: list 또는 str."""
+def db_save_keyword_mapping(user_id, ad_group_name, ad_type, medium_list, keyword_list):
+    """매핑 1건 저장 (UPSERT). medium_list, keyword_list: 리스트."""
     sb = init_supabase()
-    value = ','.join(mapped_nt_keywords) if isinstance(mapped_nt_keywords, list) else mapped_nt_keywords
     sb.table('keyword_mappings').upsert({
         'user_id': user_id,
         'ad_group_name': ad_group_name,
         'ad_type': ad_type,
-        'mapped_nt_keyword': value,
+        'mapped_nt_medium': ','.join(medium_list) if medium_list else '',
+        'mapped_nt_keyword': ','.join(keyword_list) if keyword_list else '',
     }, on_conflict='user_id,ad_group_name,ad_type').execute()
 
 

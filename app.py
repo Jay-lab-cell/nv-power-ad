@@ -184,14 +184,15 @@ def process_conversion(conv_df, medium, match_by='medium'):
     return grouped
 
 
-def build_conv_by_medium(conv_df, ad_df, medium_mappings):
-    """medium 매칭 모드: 광고그룹별로 매핑된 nt_medium 값의 전환 데이터를 합산.
-    medium_mappings: {ad_group_name: [medium1, medium2, ...]}
-    ad_df: process_ad_data 결과 (keyword 열 포함)
+def build_conv_by_mapping(conv_df, ad_df, all_mappings, ad_type_label):
+    """매핑 기반 전환 데이터 합산.
+    all_mappings: {(ag_name, ad_type): {'medium': [...], 'keyword': [...]}}
+    medium + keyword 동시 필터 지원. 각 광고그룹별로 독립 필터 적용.
     반환: merge_and_calc에 사용할 conv_grouped (nt_keyword 열 기준)
     """
+    EMPTY = pd.DataFrame(columns=['nt_keyword', '결제수', '결제금액', '결제금액(+14일기여도추정)', 'nt 클릭수'])
     if conv_df is None or len(conv_df) == 0:
-        return pd.DataFrame(columns=['nt_keyword', '결제수', '결제금액', '결제금액(+14일기여도추정)', 'nt 클릭수'])
+        return EMPTY
 
     agg_cols = ['결제수', '결제금액', '결제금액(+14일기여도추정)']
     has_inflow = '유입수' in conv_df.columns
@@ -200,10 +201,16 @@ def build_conv_by_medium(conv_df, ad_df, medium_mappings):
     for _, ad_row in ad_df.drop_duplicates(subset='광고그룹 이름').iterrows():
         ag_name = ad_row['광고그룹 이름']
         kw = ad_row['keyword']
-        mapped_mediums = medium_mappings.get(ag_name)
-        if not mapped_mediums:
-            continue
-        filtered = conv_df[conv_df['nt_medium'].isin(list(mapped_mediums))]
+        mapping = all_mappings.get((ag_name, ad_type_label), {})
+        med_list = mapping.get('medium', [])
+        kw_list = mapping.get('keyword', [])
+        if not med_list and not kw_list:
+            continue  # 매핑 없으면 기본 동작에 맡김
+        filtered = conv_df.copy()
+        if med_list:
+            filtered = filtered[filtered['nt_medium'].isin(med_list)]
+        if kw_list:
+            filtered = filtered[filtered['nt_keyword'].isin(kw_list)]
         if len(filtered) == 0:
             continue
         row = {'nt_keyword': kw}
@@ -212,43 +219,37 @@ def build_conv_by_medium(conv_df, ad_df, medium_mappings):
         row['nt 클릭수'] = filtered['유입수'].sum() if has_inflow else 0
         rows.append(row)
 
-    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['nt_keyword', '결제수', '결제금액', '결제금액(+14일기여도추정)', 'nt 클릭수'])
+    return pd.DataFrame(rows) if rows else EMPTY
 
 
-def aggregate_mapped_conversions(conv_grouped, mappings_multi):
-    """다중 매핑된 nt_keyword들의 전환 데이터를 합산.
-    mappings_multi: {ad_group_name: [kw1, kw2, ...]} (2개 이상만)
-    첫 번째 keyword를 primary key로 사용."""
-    if conv_grouped is None or len(conv_grouped) == 0 or not mappings_multi:
-        return conv_grouped
-    if 'nt_keyword' not in conv_grouped.columns:
-        return conv_grouped
+def build_conv_grouped(conv_df, ad_df, all_mappings, ad_type_label, default_medium):
+    """전환 데이터 집계: 매핑이 있는 광고그룹은 개별 필터 적용, 나머지는 기본 medium으로 처리."""
+    EMPTY = pd.DataFrame(columns=['nt_keyword', '결제수', '결제금액', '결제금액(+14일기여도추정)', 'nt 클릭수'])
+    if conv_df is None:
+        return EMPTY
 
-    extra_rows = []
-    all_aggregated_kws = []
-    for ag_name, kw_list in mappings_multi.items():
-        if len(kw_list) <= 1:
-            continue
-        primary = kw_list[0]
-        matched = conv_grouped[conv_grouped['nt_keyword'].isin(list(kw_list))]
-        if len(matched) == 0:
-            continue
-        num_cols = matched.select_dtypes(include='number')
-        if len(num_cols.columns) > 0:
-            summed = num_cols.sum().to_dict()
-        else:
-            summed = {}
-        new_row = {'nt_keyword': primary}
-        new_row.update(summed)
-        extra_rows.append(new_row)
-        all_aggregated_kws.extend(kw_list)
+    # 매핑 있는 광고그룹 → 개별 필터로 집계
+    mapped_rows = build_conv_by_mapping(conv_df, ad_df, all_mappings, ad_type_label)
+    mapped_kws = set(mapped_rows['nt_keyword'].tolist()) if len(mapped_rows) > 0 else set()
 
-    if not extra_rows:
-        return conv_grouped
+    # 매핑 없는 광고그룹 → 기본 medium으로 처리
+    unmapped_ad_groups = set(ad_df['광고그룹 이름'].unique()) - {
+        ag for (ag, at) in all_mappings if at == ad_type_label
+        and (all_mappings[(ag, at)].get('medium') or all_mappings[(ag, at)].get('keyword'))
+    }
+    unmapped_kws = set(ad_df[ad_df['광고그룹 이름'].isin(unmapped_ad_groups)]['keyword'].dropna())
 
-    result = conv_grouped[~conv_grouped['nt_keyword'].isin(all_aggregated_kws)].copy()
-    extra_df = pd.DataFrame(extra_rows)
-    return pd.concat([result, extra_df], ignore_index=True)
+    default_conv = process_conversion(conv_df, default_medium)
+    # 이미 수동 매핑된 keyword와 겹치면 제거
+    if len(default_conv) > 0 and mapped_kws:
+        default_conv = default_conv[~default_conv['nt_keyword'].isin(mapped_kws)]
+
+    if len(mapped_rows) > 0 and len(default_conv) > 0:
+        return pd.concat([mapped_rows, default_conv], ignore_index=True)
+    elif len(mapped_rows) > 0:
+        return mapped_rows
+    else:
+        return default_conv
 
 
 def merge_and_calc(ad_df, conv_grouped, period_str):
@@ -626,74 +627,27 @@ if uploaded_files and len(uploaded_files) >= 1:
     if has_ad:
         period_str = f"{start_date.strftime('%Y.%m.%d')} ~ {end_date.strftime('%Y.%m.%d')}"
 
-        # 전환 매칭 기준 선택
-        conv_match_by = 'medium'
-        if conv_df is not None:
-            conv_match_by = st.radio(
-                "전환 매칭 기준",
-                ["medium", "keyword"],
-                horizontal=True,
-                key="conv_match_by",
-                help="medium: nt_medium(powercont/pl)으로 필터 후 keyword 매칭 | keyword: medium 무시하고 nt_keyword로만 매칭"
-            )
-
-        # 전환 데이터 처리 (없으면 빈 DataFrame)
-        empty_conv = pd.DataFrame(columns=['nt_keyword', '결제수', '결제금액', '결제금액(+14일기여도추정)', 'nt 클릭수'])
-
-        # 저장된 매핑 로드 (리스트 형태)
+        # 저장된 매핑 로드
         all_mappings = db_load_keyword_mappings(user_id)
 
         result_powercont = None
         result_powerlink = None
         unmatched_pc = pd.DataFrame()
         unmatched_pl = pd.DataFrame()
+        power_ad_clean = None
+        powerlink_clean = None
 
-        if conv_match_by == 'medium':
-            # ── medium 모드: 매핑값 = nt_medium, 광고그룹별로 해당 medium 전환 합산 ──
-            pc_medium_map = {name: kw_list for (name, at), kw_list in all_mappings.items() if at == '파워컨텐츠' and kw_list}
-            pl_medium_map = {name: kw_list for (name, at), kw_list in all_mappings.items() if at == '파워링크' and kw_list}
+        if power_ad_df is not None:
+            power_ad_clean = process_ad_data(power_ad_df)
+            conv_powercont = build_conv_grouped(conv_df, power_ad_clean, all_mappings, '파워컨텐츠', 'powercont')
+            unmatched_pc = find_unmatched(power_ad_clean, conv_powercont)
+            result_powercont = merge_and_calc(power_ad_clean, conv_powercont, period_str)
 
-            if power_ad_df is not None:
-                power_ad_clean = process_ad_data(power_ad_df)
-                if conv_df is not None and pc_medium_map:
-                    conv_powercont = build_conv_by_medium(conv_df, power_ad_clean, pc_medium_map)
-                elif conv_df is not None:
-                    conv_powercont = process_conversion(conv_df, 'powercont')
-                else:
-                    conv_powercont = empty_conv
-                unmatched_pc = find_unmatched(power_ad_clean, conv_powercont)
-                result_powercont = merge_and_calc(power_ad_clean, conv_powercont, period_str)
-
-            if powerlink_df is not None:
-                powerlink_clean = process_ad_data(powerlink_df)
-                if conv_df is not None and pl_medium_map:
-                    conv_pl = build_conv_by_medium(conv_df, powerlink_clean, pl_medium_map)
-                elif conv_df is not None:
-                    conv_pl = process_conversion(conv_df, 'pl')
-                else:
-                    conv_pl = empty_conv
-                unmatched_pl = find_unmatched(powerlink_clean, conv_pl)
-                result_powerlink = merge_and_calc(powerlink_clean, conv_pl, period_str)
-        else:
-            # ── keyword 모드: 매핑값 = nt_keyword (기존 방식) ──
-            pc_mappings = {name: kw_list[0] for (name, at), kw_list in all_mappings.items() if at == '파워컨텐츠' and kw_list}
-            pl_mappings = {name: kw_list[0] for (name, at), kw_list in all_mappings.items() if at == '파워링크' and kw_list}
-            pc_multi = {name: kw_list for (name, at), kw_list in all_mappings.items() if at == '파워컨텐츠' and len(kw_list) > 1}
-            pl_multi = {name: kw_list for (name, at), kw_list in all_mappings.items() if at == '파워링크' and len(kw_list) > 1}
-
-            if power_ad_df is not None:
-                power_ad_clean = process_ad_data(power_ad_df, keyword_mappings=pc_mappings)
-                conv_powercont = process_conversion(conv_df, 'powercont', match_by='keyword') if conv_df is not None else empty_conv
-                conv_powercont = aggregate_mapped_conversions(conv_powercont, pc_multi)
-                unmatched_pc = find_unmatched(power_ad_clean, conv_powercont)
-                result_powercont = merge_and_calc(power_ad_clean, conv_powercont, period_str)
-
-            if powerlink_df is not None:
-                powerlink_clean = process_ad_data(powerlink_df, keyword_mappings=pl_mappings)
-                conv_pl = process_conversion(conv_df, 'pl', match_by='keyword') if conv_df is not None else empty_conv
-                conv_pl = aggregate_mapped_conversions(conv_pl, pl_multi)
-                unmatched_pl = find_unmatched(powerlink_clean, conv_pl)
-                result_powerlink = merge_and_calc(powerlink_clean, conv_pl, period_str)
+        if powerlink_df is not None:
+            powerlink_clean = process_ad_data(powerlink_df)
+            conv_pl = build_conv_grouped(conv_df, powerlink_clean, all_mappings, '파워링크', 'pl')
+            unmatched_pl = find_unmatched(powerlink_clean, conv_pl)
+            result_powerlink = merge_and_calc(powerlink_clean, conv_pl, period_str)
 
         # ── 키워드 매핑 UI (항상 표시) ──
         total_unmatched = len(unmatched_pc) + len(unmatched_pl)
@@ -702,36 +656,36 @@ if uploaded_files and len(uploaded_files) >= 1:
             tab_mapping, tab_saved = st.tabs(["키워드 매핑", "저장된 매핑"])
 
             with tab_mapping:
-                # 매칭 기준에 따라 드롭다운 옵션 결정
-                mapping_options = set()
-                if conv_df is not None:
-                    if conv_match_by == 'medium':
-                        mapping_options.update(conv_df['nt_medium'].dropna().unique())
-                    else:
-                        mapping_options.update(conv_df['nt_keyword'].dropna().unique())
-                # 저장된 매핑에서도 옵션 추가
-                for kw_list in all_mappings.values():
-                    mapping_options.update(kw_list)
-                mapping_options_sorted = sorted(mapping_options)
+                # 드롭다운 옵션 구성
+                medium_options = sorted(conv_df['nt_medium'].dropna().unique().tolist()) if conv_df is not None else []
+                keyword_options = sorted(conv_df['nt_keyword'].dropna().unique().tolist()) if conv_df is not None else []
 
                 # 모든 광고그룹 목록 구성 (총비용 > 0)
                 all_ad_groups = []
-                if power_ad_df is not None:
+                if power_ad_clean is not None:
                     for _, row in power_ad_clean[power_ad_clean['총비용'] > 0].drop_duplicates(subset='광고그룹 이름').iterrows():
                         is_unmatched = row['광고그룹 이름'] in unmatched_pc['광고그룹 이름'].values if len(unmatched_pc) > 0 else False
                         all_ad_groups.append(('파워컨텐츠', row['광고그룹 이름'], row['keyword'], int(row['총비용']), is_unmatched))
-                if powerlink_df is not None:
+                if powerlink_clean is not None:
                     for _, row in powerlink_clean[powerlink_clean['총비용'] > 0].drop_duplicates(subset='광고그룹 이름').iterrows():
                         is_unmatched = row['광고그룹 이름'] in unmatched_pl['광고그룹 이름'].values if len(unmatched_pl) > 0 else False
                         all_ad_groups.append(('파워링크', row['광고그룹 이름'], row['keyword'], int(row['총비용']), is_unmatched))
 
                 if not all_ad_groups:
                     st.caption("광고 데이터가 없습니다.")
-                elif not mapping_options:
+                elif not medium_options and not keyword_options:
                     st.caption("ℹ️ 전환 리포트를 업로드하면 매핑할 값을 선택할 수 있습니다.")
                 else:
                     all_ad_groups.sort(key=lambda x: (not x[4], x[0], -x[3]))
-                    match_label = "nt_medium" if conv_match_by == 'medium' else "nt_keyword"
+                    st.caption("💡 medium과 keyword를 동시에 선택하면 두 조건을 모두 만족하는 전환만 집계합니다.")
+
+                    # 헤더
+                    h1, h2, h3, h4, h5 = st.columns([3, 1, 2, 2, 1])
+                    with h1: st.caption("광고그룹")
+                    with h2: st.caption("비용")
+                    with h3: st.caption("nt_medium 선택")
+                    with h4: st.caption("nt_keyword 선택")
+                    with h5: st.caption("")
 
                     mapping_selections = {}
                     current_type = None
@@ -740,30 +694,41 @@ if uploaded_files and len(uploaded_files) >= 1:
                             current_type = ad_type_label
                             st.markdown(f"**{ad_type_label}**")
                         marker = "⚠️ " if is_unmatched else ""
-                        c1, c2, c3, c4 = st.columns([3, 2, 1, 3])
+                        saved = all_mappings.get((ag_name, ad_type_label), {})
+                        saved_med = saved.get('medium', []) if isinstance(saved, dict) else []
+                        saved_kw = saved.get('keyword', []) if isinstance(saved, dict) else []
+
+                        c1, c2, c3, c4, c5 = st.columns([3, 1, 2, 2, 1])
                         with c1:
-                            st.text(f"{marker}{ag_name[:38]}")
+                            st.text(f"{marker}{ag_name[:35]}")
                         with c2:
-                            st.text(f"추출: {kw or '없음'}")
+                            st.caption(f"₩{cost:,}")
                         with c3:
-                            st.text(f"₩{cost:,}")
-                        with c4:
-                            saved = all_mappings.get((ag_name, ad_type_label), [])
-                            default = [k for k in saved if k in mapping_options]
-                            sel = st.multiselect(
-                                match_label,
-                                mapping_options_sorted,
-                                default=default,
-                                key=f"map_{ad_type_label}_{ag_name}",
+                            sel_med = st.multiselect(
+                                "medium",
+                                medium_options,
+                                default=[m for m in saved_med if m in medium_options],
+                                key=f"map_med_{ad_type_label}_{ag_name}",
                                 label_visibility="collapsed"
                             )
-                            if sel:
-                                mapping_selections[(ag_name, ad_type_label)] = sel
+                        with c4:
+                            sel_kw = st.multiselect(
+                                "keyword",
+                                keyword_options,
+                                default=[k for k in saved_kw if k in keyword_options],
+                                key=f"map_kw_{ad_type_label}_{ag_name}",
+                                label_visibility="collapsed"
+                            )
+                        with c5:
+                            if saved_med or saved_kw:
+                                st.caption("✅저장됨")
+                        if sel_med or sel_kw:
+                            mapping_selections[(ag_name, ad_type_label)] = {'medium': sel_med, 'keyword': sel_kw}
 
                     if st.button("💾 매핑 저장", key="save_mappings"):
                         if mapping_selections:
-                            for (ag_name, at), nt_kw_list in mapping_selections.items():
-                                db_save_keyword_mapping(user_id, ag_name, at, nt_kw_list)
+                            for (ag_name, at), m in mapping_selections.items():
+                                db_save_keyword_mapping(user_id, ag_name, at, m['medium'], m['keyword'])
                             st.success(f"{len(mapping_selections)}건 매핑 저장 완료")
                             st.rerun()
                         else:
@@ -773,12 +738,17 @@ if uploaded_files and len(uploaded_files) >= 1:
                 if not all_mappings:
                     st.caption("저장된 매핑이 없습니다.")
                 else:
-                    for (ag_name, at), kw_list in all_mappings.items():
+                    for (ag_name, at), m in all_mappings.items():
+                        med_list = m.get('medium', []) if isinstance(m, dict) else []
+                        kw_list = m.get('keyword', []) if isinstance(m, dict) else []
+                        parts = []
+                        if med_list: parts.append(f"medium: {', '.join(med_list)}")
+                        if kw_list: parts.append(f"keyword: {', '.join(kw_list)}")
                         c1, c2, c3, c4 = st.columns([3, 3, 1, 1])
                         with c1:
                             st.text(ag_name[:40])
                         with c2:
-                            st.text(f"→ {', '.join(kw_list)}")
+                            st.text(' / '.join(parts) if parts else '(없음)')
                         with c3:
                             st.caption(at)
                         with c4:
