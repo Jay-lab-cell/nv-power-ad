@@ -111,9 +111,36 @@ def clean_cost(val):
         return 0
 
 
+def _find_col(df, candidates):
+    """컬럼명 자동 탐색: candidates 키워드가 포함된 컬럼 반환."""
+    for c in df.columns:
+        for kw in candidates:
+            if kw in str(c):
+                return c
+    return None
+
+
 def process_ad_data(ad_df, keyword_mappings=None):
-    ad_df = ad_df[ad_df['상태'].notna()].copy()
-    ad_df['총비용'] = ad_df['총비용(VAT포함,원)'].apply(clean_cost)
+    # '상태' 컬럼이 있으면 필터, 없으면 전체 사용
+    if '상태' in ad_df.columns:
+        ad_df = ad_df[ad_df['상태'].notna()].copy()
+    else:
+        ad_df = ad_df.copy()
+    # 총비용 컬럼 자동 탐색
+    cost_col = _find_col(ad_df, ['총비용'])
+    if cost_col and cost_col != '총비용':
+        ad_df['총비용'] = ad_df[cost_col].apply(clean_cost)
+    elif cost_col:
+        ad_df['총비용'] = ad_df['총비용'].apply(clean_cost)
+    else:
+        ad_df['총비용'] = 0
+    # 클릭수 컬럼 자동 탐색
+    if '클릭수' not in ad_df.columns:
+        click_col = _find_col(ad_df, ['클릭수', '클릭'])
+        if click_col:
+            ad_df['클릭수'] = ad_df[click_col].apply(lambda x: int(str(x).replace(',', '')) if pd.notna(x) else 0)
+        else:
+            ad_df['클릭수'] = 0
     ad_df['keyword'] = ad_df['광고그룹 이름'].apply(extract_keyword)
     # 수동 매핑 적용 (저장된 매핑이 자동 추출보다 우선)
     if keyword_mappings:
