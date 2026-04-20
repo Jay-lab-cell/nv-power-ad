@@ -10,24 +10,19 @@ jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping Supabase (SELECT 1 row)
+      - name: Ping Supabase Postgres (SELECT 1)
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          PGHOST: ${{ secrets.SUPABASE_DB_HOST }}
+          PGPORT: ${{ secrets.SUPABASE_DB_PORT }}
+          PGDATABASE: ${{ secrets.SUPABASE_DB_NAME }}
+          PGUSER: ${{ secrets.SUPABASE_DB_USER }}
+          PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          PGSSLMODE: require
         run: |
           set -e
-          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ]; then
-            echo "::error::SUPABASE_URL / SUPABASE_KEY secrets가 설정되지 않았습니다."
+          if [ -z "$PGHOST" ] || [ -z "$PGUSER" ] || [ -z "$PGPASSWORD" ]; then
+            echo "::error::SUPABASE_DB_* secrets가 설정되지 않았습니다."
             exit 1
           fi
-          STATUS=$(curl -s -o /tmp/resp.json -w "%{http_code}" \
-            "${SUPABASE_URL}/rest/v1/weekly_history?select=id&limit=1" \
-            -H "apikey: ${SUPABASE_KEY}" \
-            -H "Authorization: Bearer ${SUPABASE_KEY}")
-          echo "HTTP $STATUS"
-          cat /tmp/resp.json
-          if [ "$STATUS" != "200" ] && [ "$STATUS" != "206" ]; then
-            echo "::error::Supabase ping 실패"
-            exit 1
-          fi
+          psql -v ON_ERROR_STOP=1 -c "SELECT 1 AS alive;"
           echo "✅ Supabase alive"
