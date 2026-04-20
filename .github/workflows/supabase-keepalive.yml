@@ -1,0 +1,33 @@
+name: Supabase Keep-Alive
+
+on:
+  schedule:
+    # 매일 KST 09:00 (UTC 00:00)
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Supabase (SELECT 1 row)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          set -e
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ]; then
+            echo "::error::SUPABASE_URL / SUPABASE_KEY secrets가 설정되지 않았습니다."
+            exit 1
+          fi
+          STATUS=$(curl -s -o /tmp/resp.json -w "%{http_code}" \
+            "${SUPABASE_URL}/rest/v1/weekly_history?select=id&limit=1" \
+            -H "apikey: ${SUPABASE_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_KEY}")
+          echo "HTTP $STATUS"
+          cat /tmp/resp.json
+          if [ "$STATUS" != "200" ] && [ "$STATUS" != "206" ]; then
+            echo "::error::Supabase ping 실패"
+            exit 1
+          fi
+          echo "✅ Supabase alive"
