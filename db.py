@@ -173,6 +173,34 @@ def db_load_history(user_id):
     return df
 
 
+def db_load_period_conversions(user_id, period, ad_type):
+    """특정 기간·광고유형의 과거 저장된 전환 지표를 광고그룹 이름 키로 반환.
+    반환: {ad_group_name: {nt_clicks, orders, order_amount, order_amount_14d}}
+    """
+    sb = init_supabase()
+    if sb is None:
+        return {}
+    try:
+        res = sb.table('weekly_history').select(
+            'ad_group_name,nt_clicks,orders,order_amount,order_amount_14d'
+        ).eq('user_id', user_id).eq('analysis_period', period).eq('ad_type', ad_type).execute()
+    except Exception as e:
+        _show_db_error(e)
+        return {}
+    out = {}
+    for r in res.data or []:
+        name = r.get('ad_group_name')
+        if not name:
+            continue
+        out[name] = {
+            'nt_clicks': int(r.get('nt_clicks') or 0),
+            'orders': int(r.get('orders') or 0),
+            'order_amount': float(r.get('order_amount') or 0),
+            'order_amount_14d': float(r.get('order_amount_14d') or 0),
+        }
+    return out
+
+
 def db_update_memo(user_id, period, keyword, ad_type, new_memo_text):
     """기존 메모에 새 메모 추가."""
     from datetime import datetime
@@ -276,3 +304,90 @@ def db_delete_keyword_mapping(user_id, ad_group_name, ad_type):
         ).eq('ad_group_name', ad_group_name).eq('ad_type', ad_type).execute()
     except Exception as e:
         _show_db_error(e)
+
+
+# ── 사용자 설정 (user_settings) ──
+
+def db_get_setting(user_id, key, default=None):
+    sb = init_supabase()
+    if sb is None:
+        return default
+    try:
+        r = sb.table('user_settings').select('setting_value').eq(
+            'user_id', user_id).eq('setting_key', key).execute()
+    except Exception as e:
+        _show_db_error(e)
+        return default
+    if not r.data:
+        return default
+    return r.data[0].get('setting_value', default)
+
+
+def db_set_setting(user_id, key, value):
+    sb = init_supabase()
+    if sb is None:
+        return
+    try:
+        sb.table('user_settings').upsert({
+            'user_id': user_id,
+            'setting_key': key,
+            'setting_value': value,
+        }, on_conflict='user_id,setting_key').execute()
+    except Exception as e:
+        _show_db_error(e)
+
+
+# ── 숨김 광고그룹 (hidden_adgroups) ──
+
+def db_load_hidden_adgroups(user_id):
+    """사용자가 숨김 처리한 광고그룹 ID 집합."""
+    sb = init_supabase()
+    if sb is None:
+        return set()
+    try:
+        r = sb.table('hidden_adgroups').select('adgroup_id').eq('user_id', user_id).execute()
+    except Exception as e:
+        _show_db_error(e)
+        return set()
+    return {row['adgroup_id'] for row in (r.data or [])}
+
+
+def db_hide_adgroup(user_id, adgroup_id, ad_group_name='', ad_type=''):
+    sb = init_supabase()
+    if sb is None:
+        return
+    try:
+        sb.table('hidden_adgroups').upsert({
+            'user_id': user_id,
+            'adgroup_id': adgroup_id,
+            'ad_group_name': ad_group_name,
+            'ad_type': ad_type,
+        }, on_conflict='user_id,adgroup_id').execute()
+    except Exception as e:
+        _show_db_error(e)
+
+
+def db_unhide_adgroup(user_id, adgroup_id):
+    sb = init_supabase()
+    if sb is None:
+        return
+    try:
+        sb.table('hidden_adgroups').delete().eq(
+            'user_id', user_id).eq('adgroup_id', adgroup_id).execute()
+    except Exception as e:
+        _show_db_error(e)
+
+
+def db_load_hidden_detail(user_id):
+    """숨김 리스트 전체 상세 (복원 UI용)."""
+    sb = init_supabase()
+    if sb is None:
+        return []
+    try:
+        r = sb.table('hidden_adgroups').select(
+            'adgroup_id,ad_group_name,ad_type,created_at'
+        ).eq('user_id', user_id).order('created_at', desc=True).execute()
+    except Exception as e:
+        _show_db_error(e)
+        return []
+    return r.data or []

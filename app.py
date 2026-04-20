@@ -5,14 +5,29 @@ import re
 from datetime import date, timedelta, datetime
 
 from db import (get_user_id, db_save_weekly, db_load_history, db_update_memo, db_set_memo,
-                db_load_keyword_mappings, db_save_keyword_mapping, db_delete_keyword_mapping)
-from naver_sa_api import fetch_ad_data
+                db_load_keyword_mappings, db_save_keyword_mapping, db_delete_keyword_mapping,
+                db_load_period_conversions, db_get_setting, db_set_setting,
+                db_load_hidden_adgroups, db_hide_adgroup, db_unhide_adgroup, db_load_hidden_detail)
+from naver_sa_api import fetch_ad_data, list_campaigns
 
 st.set_page_config(page_title="네이버 광고 ROAS 분석", layout="wide")
 st.title("네이버 파워링크 & 파워컨텐츠 ROAS 분석")
 
 # ── 사용자 식별 ──
 user_id = get_user_id()
+# 사용자 전환 감지 → API 관련 캐시 무효화
+if st.session_state.get('_last_uid') != user_id:
+    for k in ('api_campaigns_df', 'api_ad_cache'):
+        st.session_state.pop(k, None)
+    st.session_state['_last_uid'] = user_id
+with st.sidebar:
+    st.caption(f"👤 현재 사용자: `{user_id}`")
+    switch_uid = st.text_input("사용자 전환", placeholder="예: admin", key="switch_uid_input")
+    if st.button("전환", key="switch_uid_btn") and switch_uid.strip():
+        st.query_params["uid"] = switch_uid.strip()
+        for k in ('api_campaigns_df', 'api_ad_cache'):
+            st.session_state.pop(k, None)
+        st.rerun()
 
 # ── Sticky 헤더 CSS ──
 st.markdown("""
@@ -253,6 +268,34 @@ def build_conv_grouped(conv_df, ad_df, all_mappings, ad_type_label, default_medi
         return default_conv
 
 
+def apply_saved_conversions(result_df, saved_map):
+    """result_df의 결제수·결제금액이 0인 행을 DB 저장값으로 보강.
+    saved_map: {ad_group_name: {nt_clicks, orders, order_amount, order_amount_14d}}
+    ROAS/전환율은 재계산.
+    """
+    if result_df is None or len(result_df) == 0 or not saved_map:
+        return result_df
+    df = result_df.copy()
+    for i, row in df.iterrows():
+        ag = row['광고그룹 이름']
+        saved = saved_map.get(ag)
+        if not saved:
+            continue
+        # 기존 값이 있으면(엑셀 우선) 건너뜀
+        if row['결제수'] > 0 or row['결제금액'] > 0:
+            continue
+        df.at[i, 'nt 클릭수'] = saved['nt_clicks']
+        df.at[i, '결제수'] = saved['orders']
+        df.at[i, '결제금액'] = saved['order_amount']
+        df.at[i, '결제금액(+14일기여도추정)'] = saved['order_amount_14d']
+        clicks = row['클릭수']
+        cost = row['총비용']
+        df.at[i, '전환율(%)'] = (saved['orders'] / clicks * 100) if clicks > 0 else 0
+        df.at[i, 'ROAS(%)'] = (saved['order_amount'] / cost * 100) if cost > 0 else 0
+        df.at[i, 'ROAS_14일(%)'] = (saved['order_amount_14d'] / cost * 100) if cost > 0 else 0
+    return df
+
+
 def merge_and_calc(ad_df, conv_grouped, period_str):
     merged = ad_df.merge(conv_grouped, left_on='keyword', right_on='nt_keyword', how='left')
     for col in ['결제수', '결제금액', '결제금액(+14일기여도추정)', 'nt 클릭수']:
@@ -273,9 +316,12 @@ def merge_and_calc(ad_df, conv_grouped, period_str):
     merged['분석 기간'] = period_str
     merged = merged.sort_values('총비용', ascending=False).reset_index(drop=True)
 
-    result = merged[['분석 기간', '광고그룹 이름', 'keyword', '총비용', '평균CPC',
-                      '클릭수', 'nt 클릭수', '결제수', '결제금액', '결제금액(+14일기여도추정)',
-                      '전환율(%)', 'ROAS(%)', 'ROAS_14일(%)']].copy()
+    keep_cols = ['분석 기간', '광고그룹 이름', 'keyword', '총비용', '평균CPC',
+                 '클릭수', 'nt 클릭수', '결제수', '결제금액', '결제금액(+14일기여도추정)',
+                 '전환율(%)', 'ROAS(%)', 'ROAS_14일(%)']
+    if '광고그룹 ID' in merged.columns:
+        keep_cols.insert(2, '광고그룹 ID')
+    result = merged[keep_cols].copy()
     return result
 
 
@@ -618,21 +664,51 @@ match_info = {}
 
 if data_source.startswith("🔄"):
     # ── API 모드 ──
+    # 캠페인 목록 로드 (세션 캐시)
+    if 'api_campaigns_df' not in st.session_state:
+        try:
+            st.session_state['api_campaigns_df'] = list_campaigns()
+        except Exception as e:
+            st.error(f"❌ 캠페인 목록 로드 실패: {e}")
+            st.stop()
+    camp_df = st.session_state['api_campaigns_df']
+    camp_pl_pc = camp_df[camp_df['유형'].isin(['파워링크', '파워컨텐츠'])].copy()
+
+    # 저장된 선택 캠페인 ID 로드 (없으면 '논문 파워컨텐츠', 'PL_논문 파링' 기본)
+    saved_camp_ids = db_get_setting(user_id, 'selected_campaign_ids', None)
+    if saved_camp_ids is None:
+        default_names = ['논문 파워컨텐츠', 'PL_논문 파링']
+        saved_camp_ids = camp_pl_pc[camp_pl_pc['campaign_name'].isin(default_names)]['campaign_id'].tolist()
+
+    # id ↔ label 매핑
+    camp_label_map = {r['campaign_id']: f"[{r['유형']}] {r['campaign_name']}" for _, r in camp_pl_pc.iterrows()}
+    selected_camp_ids = st.multiselect(
+        "📌 조회할 캠페인",
+        options=camp_pl_pc['campaign_id'].tolist(),
+        default=[cid for cid in saved_camp_ids if cid in camp_pl_pc['campaign_id'].values],
+        format_func=lambda cid: camp_label_map.get(cid, cid),
+        key="selected_campaigns",
+    )
+    # 선택 변경 시 DB에 즉시 저장 (+ 캐시 무효화)
+    if selected_camp_ids != saved_camp_ids:
+        db_set_setting(user_id, 'selected_campaign_ids', selected_camp_ids)
+        st.session_state.pop('api_ad_cache', None)
+
     col_btn, col_info = st.columns([1, 3])
     with col_btn:
         refresh = st.button("🔄 광고데이터 새로고침")
     with col_info:
-        st.caption(f"기간: {start_date} ~ {end_date} (광고결과만 자동, 전환 리포트는 아래 업로드)")
+        st.caption(f"기간: {start_date} ~ {end_date} · 캠페인 {len(selected_camp_ids)}개 선택")
 
-    cache_key = (start_date.isoformat(), end_date.isoformat())
+    cache_key = (start_date.isoformat(), end_date.isoformat(), tuple(sorted(selected_camp_ids)))
     if 'api_ad_cache' not in st.session_state:
         st.session_state['api_ad_cache'] = {}
 
-    if refresh or cache_key in st.session_state['api_ad_cache']:
+    if selected_camp_ids and (refresh or cache_key in st.session_state['api_ad_cache']):
         if refresh or cache_key not in st.session_state['api_ad_cache']:
             try:
                 with st.spinner("네이버 검색광고 API 호출 중..."):
-                    pl_df, pc_df = fetch_ad_data(start_date, end_date)
+                    pl_df, pc_df = fetch_ad_data(start_date, end_date, campaign_ids=selected_camp_ids)
                 st.session_state['api_ad_cache'][cache_key] = (pl_df, pc_df)
             except Exception as e:
                 st.error(f"❌ API 호출 실패: {e}")
@@ -645,18 +721,21 @@ if data_source.startswith("🔄"):
         with cols[1]:
             st.success(f"✅ 파워컨텐츠: {len(power_ad_df)}개 광고그룹")
         match_info = {'파워링크': 'API', '파워컨텐츠': 'API'}
+    elif not selected_camp_ids:
+        st.warning("⚠️ 조회할 캠페인을 1개 이상 선택하세요.")
 
     conv_files = st.file_uploader(
-        "전환 리포트 업로드 (1개)",
+        "전환 리포트 업로드 (여러 개 가능)",
         type=["xlsx", "csv"],
-        accept_multiple_files=False,
+        accept_multiple_files=True,
         key="api_conv_upload",
     )
-    if conv_files is not None:
-        conv_df = load_file(conv_files)
-        match_info['전환 리포트'] = conv_files.name
+    if conv_files:
+        dfs = [load_file(f) for f in conv_files]
+        conv_df = pd.concat(dfs, ignore_index=True) if len(dfs) > 1 else dfs[0]
+        match_info['전환 리포트'] = ", ".join(f.name for f in conv_files)
 
-    uploaded_files = [conv_files] if conv_files else []
+    uploaded_files = list(conv_files) if conv_files else []
 else:
     uploaded_files = st.file_uploader(
         "파일을 드래그하여 한번에 업로드 (파워컨텐츠 + 파워링크 + 전환 리포트)",
@@ -693,17 +772,36 @@ if (powerlink_df is not None) or (power_ad_df is not None) or (uploaded_files an
         power_ad_clean = None
         powerlink_clean = None
 
+        # API 모드에서 전환 엑셀 없으면 DB 저장값 폴백 (광고그룹 이름 단위)
+        use_db_fallback = (conv_df is None)
+        saved_pc = db_load_period_conversions(user_id, period_str, '파워컨텐츠') if use_db_fallback else {}
+        saved_pl = db_load_period_conversions(user_id, period_str, '파워링크') if use_db_fallback else {}
+
         if power_ad_df is not None:
             power_ad_clean = process_ad_data(power_ad_df)
             conv_powercont = build_conv_grouped(conv_df, power_ad_clean, all_mappings, '파워컨텐츠', 'powercont')
             unmatched_pc = find_unmatched(power_ad_clean, conv_powercont)
             result_powercont = merge_and_calc(power_ad_clean, conv_powercont, period_str)
+            if saved_pc:
+                result_powercont = apply_saved_conversions(result_powercont, saved_pc)
 
         if powerlink_df is not None:
             powerlink_clean = process_ad_data(powerlink_df)
             conv_pl = build_conv_grouped(conv_df, powerlink_clean, all_mappings, '파워링크', 'pl')
             unmatched_pl = find_unmatched(powerlink_clean, conv_pl)
             result_powerlink = merge_and_calc(powerlink_clean, conv_pl, period_str)
+            if saved_pl:
+                result_powerlink = apply_saved_conversions(result_powerlink, saved_pl)
+
+        if use_db_fallback:
+            if saved_pc or saved_pl:
+                st.info(f"ℹ️ 전환 엑셀 미업로드 — DB의 저장된 전환값으로 자동 채움 (파워컨텐츠 {len(saved_pc)}건, 파워링크 {len(saved_pl)}건, user={user_id}, period={period_str})")
+            else:
+                st.warning(
+                    f"⚠️ 전환 엑셀 없음 + DB에도 [{period_str}] 기간의 저장된 전환값 없음 "
+                    f"(user=`{user_id}`) — 결제/ROAS는 0으로 표시됨. "
+                    f"{'URL에 `?uid=admin`을 붙여 접속하세요.' if user_id != 'admin' and user_id != 'leejay' else '다른 기간으로 이동하거나 전환 리포트 엑셀을 업로드하세요.'}"
+                )
 
         # ── 키워드 매핑 UI (항상 표시) ──
         total_unmatched = len(unmatched_pc) + len(unmatched_pl)
@@ -858,10 +956,17 @@ if (powerlink_df is not None) or (power_ad_df is not None) or (uploaded_files an
 
         # ── 컨트롤 영역 ──
         st.markdown("---")
-        ctrl_col1, ctrl_col2 = st.columns([1, 1])
+        ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1, 1, 1])
         with ctrl_col1:
-            hide_zero = st.checkbox("총비용 0원 항목 숨기기", value=True)
+            hide_zero = st.radio(
+                "총비용 0원 항목",
+                ["숨김", "표시"],
+                index=0,
+                horizontal=True,
+            ) == "숨김"
         with ctrl_col2:
+            show_hidden = st.checkbox("숨긴 광고그룹 포함해서 보기", value=False)
+        with ctrl_col3:
             if st.button("📥 주간 데이터 저장"):
                 pc_memos = {(p, kw): v for (p, kw, at), v in st.session_state['current_memos'].items() if at == '파워컨텐츠'}
                 pl_memos = {(p, kw): v for (p, kw, at), v in st.session_state['current_memos'].items() if at == '파워링크'}
@@ -871,39 +976,88 @@ if (powerlink_df is not None) or (power_ad_df is not None) or (uploaded_files an
                     save_weekly(result_powerlink, '파워링크', memo_dict=pl_memos if pl_memos else None)
                 st.success(f"✅ [{period_str}] 주간 데이터가 저장되었습니다.")
 
-        # ── 성과 테이블: 파워컨텐츠 ──
-        if result_powercont is not None:
-            display_pc = result_powercont[result_powercont['총비용'] > 0].copy() if hide_zero else result_powercont.copy()
-            st.subheader(f"📊 파워컨텐츠 성과 [{period_str}]")
-            fmt_pc = format_result(display_pc)
-            pc_memo_src = {(r['분석 기간'], r['keyword']): _get_current_memo(r['분석 기간'], r['keyword'], '파워컨텐츠')
-                           for _, r in display_pc.iterrows()}
-            fmt_pc = add_memo_column(fmt_pc, pc_memo_src)
-            styled_pc = fmt_pc.style.apply(lambda _: highlight_low_roas(fmt_pc, target_roas), axis=None)
-            st.caption("💡 행을 클릭하면 메모를 추가/조회할 수 있습니다")
-            ev_pc = st.dataframe(styled_pc, use_container_width=True, hide_index=True,
-                                 on_select="rerun", selection_mode="single-row", key="df_pc")
-            if ev_pc.selection.rows:
-                idx = ev_pc.selection.rows[0]
-                row = display_pc.iloc[idx]
-                render_memo_panel(row['분석 기간'], row['keyword'], '파워컨텐츠', 'pc')
+        # ── 숨김 광고그룹 ID 로드 ──
+        hidden_ids = db_load_hidden_adgroups(user_id)
 
-        # ── 성과 테이블: 파워링크 ──
-        if result_powerlink is not None:
-            display_pl = result_powerlink[result_powerlink['총비용'] > 0].copy() if hide_zero else result_powerlink.copy()
-            st.subheader(f"📊 파워링크 성과 [{period_str}]")
-            fmt_pl = format_result(display_pl)
-            pl_memo_src = {(r['분석 기간'], r['keyword']): _get_current_memo(r['분석 기간'], r['keyword'], '파워링크')
-                           for _, r in display_pl.iterrows()}
-            fmt_pl = add_memo_column(fmt_pl, pl_memo_src)
-            styled_pl = fmt_pl.style.apply(lambda _: highlight_low_roas(fmt_pl, target_roas), axis=None)
-            st.caption("💡 행을 클릭하면 메모를 추가/조회할 수 있습니다")
-            ev_pl = st.dataframe(styled_pl, use_container_width=True, hide_index=True,
-                                 on_select="rerun", selection_mode="single-row", key="df_pl")
-            if ev_pl.selection.rows:
-                idx = ev_pl.selection.rows[0]
-                row = display_pl.iloc[idx]
-                render_memo_panel(row['분석 기간'], row['keyword'], '파워링크', 'pl')
+        def _apply_hidden_filter(df):
+            if show_hidden or not hidden_ids or df is None or len(df) == 0:
+                return df
+            if '광고그룹 ID' in df.columns:
+                return df[~df['광고그룹 ID'].isin(hidden_ids)].copy()
+            return df
+
+        def _render_result_table(result_df, ad_type_label, key_prefix):
+            if result_df is None:
+                return
+            df = result_df[result_df['총비용'] > 0].copy() if hide_zero else result_df.copy()
+            df = _apply_hidden_filter(df)
+            hidden_count = 0
+            if not show_hidden and '광고그룹 ID' in result_df.columns:
+                hidden_count = result_df['광고그룹 ID'].isin(hidden_ids).sum()
+            header = f"📊 {ad_type_label} 성과 [{period_str}]"
+            if hidden_count > 0:
+                header += f"  (숨김 {hidden_count}개)"
+            st.subheader(header)
+
+            if len(df) == 0:
+                st.caption("표시할 광고그룹이 없습니다.")
+                return
+
+            fmt = format_result(df)
+            memo_src = {(r['분석 기간'], r['keyword']): _get_current_memo(r['분석 기간'], r['keyword'], ad_type_label)
+                        for _, r in df.iterrows()}
+            fmt = add_memo_column(fmt, memo_src)
+            # 광고그룹 ID는 UI에 노출 안 함
+            if '광고그룹 ID' in fmt.columns:
+                fmt_display = fmt.drop(columns=['광고그룹 ID'])
+            else:
+                fmt_display = fmt
+            styled = fmt_display.style.apply(lambda _: highlight_low_roas(fmt_display, target_roas), axis=None)
+            st.caption("💡 행을 클릭하면 메모 및 숨김 처리 가능")
+            ev = st.dataframe(styled, use_container_width=True, hide_index=True,
+                              on_select="rerun", selection_mode="single-row", key=f"df_{key_prefix}")
+            if ev.selection.rows:
+                idx = ev.selection.rows[0]
+                row = df.iloc[idx]
+                ag_id = row.get('광고그룹 ID', '')
+                ag_name = row['광고그룹 이름']
+                with st.container(border=True):
+                    col_a, col_b = st.columns([3, 1])
+                    with col_a:
+                        st.markdown(f"**{ag_name}**")
+                        st.caption(f"ID: `{ag_id}`")
+                    with col_b:
+                        if ag_id and ag_id in hidden_ids:
+                            if st.button("♻️ 숨김 해제", key=f"unhide_{key_prefix}_{ag_id}"):
+                                db_unhide_adgroup(user_id, ag_id)
+                                st.rerun()
+                        elif ag_id:
+                            if st.button("🙈 숨김", key=f"hide_{key_prefix}_{ag_id}"):
+                                db_hide_adgroup(user_id, ag_id, ag_name, ad_type_label)
+                                st.rerun()
+                        else:
+                            st.caption("(ID 없음)")
+                render_memo_panel(row['분석 기간'], row['keyword'], ad_type_label, key_prefix)
+
+        _render_result_table(result_powercont, '파워컨텐츠', 'pc')
+        _render_result_table(result_powerlink, '파워링크', 'pl')
+
+        # ── 숨김 목록 관리 ──
+        hidden_detail = db_load_hidden_detail(user_id)
+        if hidden_detail:
+            with st.expander(f"🙈 숨김 목록 ({len(hidden_detail)}개)"):
+                for h in hidden_detail:
+                    c1, c2, c3, c4 = st.columns([4, 2, 2, 1])
+                    with c1:
+                        st.text(h.get('ad_group_name') or h.get('adgroup_id', ''))
+                    with c2:
+                        st.caption(h.get('ad_type', '') or '—')
+                    with c3:
+                        st.caption((h.get('created_at') or '')[:10])
+                    with c4:
+                        if st.button("♻️", key=f"unhide_list_{h['adgroup_id']}", help="숨김 해제"):
+                            db_unhide_adgroup(user_id, h['adgroup_id'])
+                            st.rerun()
 
     else:
         st.warning("광고 파일(파워컨텐츠 또는 파워링크)을 하나 이상 업로드해주세요.")
@@ -920,6 +1074,19 @@ if history is not None and len(history) > 0:
     hist_filtered = filter_history_by_dates(hist_filtered, start_date, end_date)
 
     if len(hist_filtered) > 0:
+        hist_hide_zero = st.radio(
+            "총비용 0원 항목",
+            ["숨김", "표시"],
+            index=0,
+            horizontal=True,
+            key="trend_hide_zero",
+        ) == "숨김"
+        if hist_hide_zero:
+            nonzero_kws = set(
+                hist_filtered[hist_filtered['총비용'] > 0]['keyword'].dropna().unique()
+            )
+            hist_filtered = hist_filtered[hist_filtered['keyword'].isin(nonzero_kws)]
+
         available_keywords = sorted(hist_filtered['keyword'].dropna().unique().tolist())
         selected_keywords = st.multiselect(
             "키워드 선택", available_keywords, default=available_keywords, key="trend_keywords"
@@ -950,6 +1117,36 @@ if history is not None and len(history) > 0:
             st.caption("💡 행을 클릭하면 메모를 추가/조회할 수 있습니다")
             ev_hist = st.dataframe(styled_hist, use_container_width=True, hide_index=True,
                                    on_select="rerun", selection_mode="single-row", key="df_hist")
+
+            # ── 기간 합계 ──
+            sum_cost = int(chart_data['총비용'].fillna(0).sum())
+            sum_clk = int(chart_data['클릭수'].fillna(0).sum())
+            sum_nt = int(chart_data['nt 클릭수'].fillna(0).sum()) if 'nt 클릭수' in chart_data.columns else 0
+            sum_ord = int(chart_data['결제수'].fillna(0).sum())
+            sum_amt = int(chart_data['결제금액'].fillna(0).sum())
+            sum_amt14 = int(chart_data['결제금액(+14일기여도추정)'].fillna(0).sum()) if '결제금액(+14일기여도추정)' in chart_data.columns else 0
+            avg_cpc = int(sum_cost / sum_clk) if sum_clk else 0
+            conv_rate = (sum_ord / sum_clk * 100) if sum_clk else 0
+            roas = (sum_amt / sum_cost * 100) if sum_cost else 0
+            roas14 = (sum_amt14 / sum_cost * 100) if sum_cost else 0
+            total_row = {
+                '분석 기간': f"기간 합계 ({start_date.strftime('%m/%d')}~{end_date.strftime('%m/%d')})",
+                'keyword': f"{len(selected_keywords)}개 키워드",
+                '총비용': f"{sum_cost:,}",
+                '클릭수': f"{sum_clk:,}",
+                '평균CPC': f"{avg_cpc:,}원",
+                'nt 클릭수': f"{sum_nt:,}",
+                '결제수': f"{sum_ord:,}",
+                '결제금액': f"{sum_amt:,}",
+                '결제금액(+14일기여도추정)': f"{sum_amt14:,}",
+                '전환율(%)': f"{conv_rate:.2f}%",
+                'ROAS(%)': f"{int(round(roas)):,}%",
+                'ROAS_14일(%)': f"{int(round(roas14)):,}%",
+            }
+            total_cols = [c for c in fmt_hist.columns if c in total_row]
+            total_df = pd.DataFrame([[total_row[c] for c in total_cols]], columns=total_cols)
+            st.markdown("##### 📊 기간 합계")
+            st.dataframe(total_df, use_container_width=True, hide_index=True)
             if ev_hist.selection.rows:
                 idx = ev_hist.selection.rows[0]
                 row = display_hist.iloc[idx]

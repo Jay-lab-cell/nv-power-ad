@@ -20,30 +20,47 @@ import streamlit as st
 BASE_URL = "https://api.searchad.naver.com"
 
 
-def _load_credentials():
-    """st.secrets 우선, 없으면 ~/.claude/.env에서 로드."""
+def _current_user_id():
     try:
-        sec = st.secrets["naver_sa"]
-        return sec["api_key"], sec["secret_key"], str(sec["customer_id"])
+        params = st.query_params
+        if "uid" in params:
+            return str(params["uid"])
+    except Exception:
+        pass
+    return ""
+
+
+def _load_credentials():
+    """st.secrets 우선 (user_id별 분기 지원), 없으면 ~/.claude/.env에서 로드."""
+    uid = _current_user_id()
+    try:
+        sec_root = st.secrets["naver_sa"]
+        if uid and uid in sec_root:
+            sec = sec_root[uid]
+            return sec["api_key"], sec["secret_key"], str(sec["customer_id"])
+        return sec_root["api_key"], sec_root["secret_key"], str(sec_root["customer_id"])
     except Exception:
         pass
 
+    # .env 직접 파싱 (load_dotenv override 이슈 회피)
+    creds = {"NAVER_SA_API_KEY": "", "NAVER_SA_SECRET_KEY": "", "NAVER_SA_CUSTOMER_ID": ""}
     env_path = Path.home() / ".claude" / ".env"
     if env_path.exists():
-        try:
-            from dotenv import load_dotenv
-            load_dotenv(env_path)
-        except ImportError:
-            for line in env_path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    os.environ.setdefault(k.strip(), v.strip().split("#")[0].strip())
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip()
+            if k in creds:
+                creds[k] = v.strip().split("#")[0].strip()
 
-    api_key = os.getenv("NAVER_SA_API_KEY", "")
-    secret = os.getenv("NAVER_SA_SECRET_KEY", "")
-    customer_id = os.getenv("NAVER_SA_CUSTOMER_ID", "")
-    return api_key, secret, customer_id
+    # .env가 비어있으면 환경변수 폴백
+    for k in creds:
+        if not creds[k]:
+            creds[k] = os.getenv(k, "")
+
+    return creds["NAVER_SA_API_KEY"], creds["NAVER_SA_SECRET_KEY"], creds["NAVER_SA_CUSTOMER_ID"]
 
 
 def _sign(secret: str, method: str, path: str, timestamp: str) -> str:
@@ -86,6 +103,27 @@ def _classify_campaign_type(campaign_tp: str, adgroup_id: str) -> str:
         if m.group(1) == "01":
             return "파워링크"
     return "기타"
+
+
+def list_campaigns() -> pd.DataFrame:
+    """전체 캠페인 목록 (nccCampaignId, name, campaignTp)."""
+    path = "/ncc/campaigns"
+    r = requests.get(BASE_URL + path, headers=_headers("GET", path), timeout=30)
+    r.raise_for_status()
+    rows = []
+    for c in r.json():
+        rows.append({
+            "campaign_id": c.get("nccCampaignId"),
+            "campaign_name": c.get("name"),
+            "campaign_type": c.get("campaignTp", ""),
+        })
+    df = pd.DataFrame(rows)
+    if len(df) > 0:
+        df["유형"] = df.apply(
+            lambda r: _classify_campaign_type(r["campaign_type"], ""),
+            axis=1,
+        )
+    return df
 
 
 def list_adgroups() -> pd.DataFrame:
@@ -144,9 +182,10 @@ def fetch_stats(adgroup_ids: list, since: str, until: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def fetch_ad_data(start_date: date, end_date: date):
-    """파워링크/파워컨텐츠 광고결과를 한 번에 조회.
-    반환: (powerlink_df, powercont_df) — process_ad_data() 입력 호환 컬럼.
+def fetch_ad_data(start_date: date, end_date: date, campaign_ids: list = None):
+    """파워링크/파워컨텐츠 광고결과 조회.
+    campaign_ids: None이면 전체. 리스트 주면 해당 캠페인 소속 광고그룹만.
+    반환: (powerlink_df, powercont_df)
     """
     since = start_date.strftime("%Y-%m-%d")
     until = end_date.strftime("%Y-%m-%d")
@@ -156,11 +195,15 @@ def fetch_ad_data(start_date: date, end_date: date):
         empty = pd.DataFrame(columns=["광고그룹 ID", "광고그룹 이름", "상태", "총비용", "클릭수"])
         return empty, empty
 
-    # 파워링크/파워컨텐츠만 stats 조회 (쇼핑검색 등 제외)
     target = ag_df[ag_df["유형"].isin(["파워링크", "파워컨텐츠"])].copy()
+    if campaign_ids:
+        target = target[target["campaign_id"].isin(campaign_ids)].copy()
+    if len(target) == 0:
+        empty = pd.DataFrame(columns=["광고그룹 ID", "광고그룹 이름", "상태", "총비용", "클릭수"])
+        return empty, empty
+
     stats = fetch_stats(target["광고그룹 ID"].dropna().astype(str).tolist(), since, until)
-    ag_df = target
-    merged = ag_df.merge(stats, on="광고그룹 ID", how="left")
+    merged = target.merge(stats, on="광고그룹 ID", how="left")
     merged["총비용"] = merged["총비용"].fillna(0).astype(int)
     merged["클릭수"] = merged["클릭수"].fillna(0).astype(int)
 
