@@ -10,7 +10,7 @@ from db import (get_user_id, db_save_weekly, db_load_history, db_update_memo, db
                 db_load_hidden_adgroups, db_hide_adgroup, db_unhide_adgroup, db_load_hidden_detail)
 from naver_sa_api import fetch_ad_data, list_campaigns
 
-st.set_page_config(page_title="네이버 광고 ROAS 분석", layout="wide")
+st.set_page_config(page_title="네이버 광고 ROAS 분석", layout="wide", initial_sidebar_state="expanded")
 st.title("네이버 파워링크 & 파워컨텐츠 ROAS 분석")
 
 # ── 사용자 식별 ──
