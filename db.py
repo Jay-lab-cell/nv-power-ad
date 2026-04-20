@@ -3,6 +3,24 @@ import pandas as pd
 import uuid
 from supabase import create_client
 
+try:
+    from httpx import ConnectError as _HttpxConnectError, ConnectTimeout as _HttpxConnectTimeout
+    _CONN_ERRORS = (_HttpxConnectError, _HttpxConnectTimeout, OSError)
+except Exception:
+    _CONN_ERRORS = (OSError,)
+
+
+def _show_db_error(e):
+    msg = str(e) or type(e).__name__
+    if not st.session_state.get('_db_error_shown'):
+        st.warning(
+            "⚠️ Supabase에 연결할 수 없습니다. "
+            "Streamlit Cloud의 Secrets에서 `supabase.url`, `supabase.key`를 확인하거나, "
+            "Supabase 프로젝트가 일시중지 상태인지 확인해주세요.\n\n"
+            f"상세: `{msg[:200]}`"
+        )
+        st.session_state['_db_error_shown'] = True
+
 # ── 한글 ↔ DB 컬럼 매핑 ──
 COL_KR_TO_DB = {
     '분석 기간': 'analysis_period',
@@ -26,9 +44,17 @@ COL_DB_TO_KR = {v: k for k, v in COL_KR_TO_DB.items()}
 
 @st.cache_resource(ttl=3600)
 def init_supabase():
-    url = st.secrets["supabase"]["url"]
-    key = st.secrets["supabase"]["key"]
-    return create_client(url, key)
+    try:
+        url = st.secrets["supabase"]["url"]
+        key = st.secrets["supabase"]["key"]
+    except Exception as e:
+        _show_db_error(f"Secrets 누락: {e}")
+        return None
+    try:
+        return create_client(url, key)
+    except Exception as e:
+        _show_db_error(e)
+        return None
 
 
 def get_user_id():
@@ -99,28 +125,39 @@ def _rows_to_df(rows):
 def db_save_weekly(user_id, df, ad_type, memo_dict=None):
     """주간 데이터 저장 (UPSERT)."""
     sb = init_supabase()
+    if sb is None:
+        return
     records = _df_to_records(df, user_id, ad_type, memo_dict)
 
-    # 기존 메모 보존: memo_dict가 없으면 기존 DB의 메모를 유지
-    if memo_dict is None:
-        period = records[0]['analysis_period'] if records else ''
-        existing = sb.table('weekly_history').select('keyword,memo').eq(
-            'user_id', user_id
-        ).eq('analysis_period', period).eq('ad_type', ad_type).execute()
-        old_memos = {r['keyword']: r['memo'] for r in existing.data if r.get('memo')}
-        for rec in records:
-            if rec['keyword'] in old_memos:
-                rec['memo'] = old_memos[rec['keyword']]
+    try:
+        # 기존 메모 보존: memo_dict가 없으면 기존 DB의 메모를 유지
+        if memo_dict is None:
+            period = records[0]['analysis_period'] if records else ''
+            existing = sb.table('weekly_history').select('keyword,memo').eq(
+                'user_id', user_id
+            ).eq('analysis_period', period).eq('ad_type', ad_type).execute()
+            old_memos = {r['keyword']: r['memo'] for r in existing.data if r.get('memo')}
+            for rec in records:
+                if rec['keyword'] in old_memos:
+                    rec['memo'] = old_memos[rec['keyword']]
 
-    sb.table('weekly_history').upsert(
-        records, on_conflict='user_id,analysis_period,keyword,ad_type'
-    ).execute()
+        sb.table('weekly_history').upsert(
+            records, on_conflict='user_id,analysis_period,keyword,ad_type'
+        ).execute()
+    except Exception as e:
+        _show_db_error(e)
 
 
 def db_load_history(user_id):
     """사용자의 전체 주간 이력 로드."""
     sb = init_supabase()
-    result = sb.table('weekly_history').select('*').eq('user_id', user_id).execute()
+    if sb is None:
+        return None
+    try:
+        result = sb.table('weekly_history').select('*').eq('user_id', user_id).execute()
+    except Exception as e:
+        _show_db_error(e)
+        return None
     df = _rows_to_df(result.data)
     if df is not None:
         # 호환성 처리
@@ -149,26 +186,37 @@ def db_update_memo(user_id, period, keyword, ad_type, new_memo_text):
         return MEMO_SEP.join(parts)
 
     sb = init_supabase()
-    result = sb.table('weekly_history').select('memo').eq(
-        'user_id', user_id
-    ).eq('analysis_period', period).eq('keyword', keyword).eq('ad_type', ad_type).execute()
-    if result.data:
-        old_memo = result.data[0].get('memo', '')
-        new_val = _append(old_memo, new_memo_text)
-        sb.table('weekly_history').update({'memo': new_val}).eq(
+    if sb is None:
+        return False
+    try:
+        result = sb.table('weekly_history').select('memo').eq(
             'user_id', user_id
         ).eq('analysis_period', period).eq('keyword', keyword).eq('ad_type', ad_type).execute()
-        return True
+        if result.data:
+            old_memo = result.data[0].get('memo', '')
+            new_val = _append(old_memo, new_memo_text)
+            sb.table('weekly_history').update({'memo': new_val}).eq(
+                'user_id', user_id
+            ).eq('analysis_period', period).eq('keyword', keyword).eq('ad_type', ad_type).execute()
+            return True
+    except Exception as e:
+        _show_db_error(e)
     return False
 
 
 def db_set_memo(user_id, period, keyword, ad_type, memo_str):
     """메모를 직접 설정 (삭제용)."""
     sb = init_supabase()
-    sb.table('weekly_history').update({'memo': memo_str}).eq(
-        'user_id', user_id
-    ).eq('analysis_period', period).eq('keyword', keyword).eq('ad_type', ad_type).execute()
-    return True
+    if sb is None:
+        return False
+    try:
+        sb.table('weekly_history').update({'memo': memo_str}).eq(
+            'user_id', user_id
+        ).eq('analysis_period', period).eq('keyword', keyword).eq('ad_type', ad_type).execute()
+        return True
+    except Exception as e:
+        _show_db_error(e)
+        return False
 
 
 # ── 키워드 매핑 CRUD ──
@@ -178,10 +226,16 @@ def db_load_keyword_mappings(user_id):
     반환: {(ad_group_name, ad_type): {'medium': [...], 'keyword': [...]}}
     """
     sb = init_supabase()
-    result = sb.table('keyword_mappings').select(
-        'ad_group_name,ad_type,mapped_nt_keyword,mapped_nt_medium'
-    ).eq('user_id', user_id).execute()
     mappings = {}
+    if sb is None:
+        return mappings
+    try:
+        result = sb.table('keyword_mappings').select(
+            'ad_group_name,ad_type,mapped_nt_keyword,mapped_nt_medium'
+        ).eq('user_id', user_id).execute()
+    except Exception as e:
+        _show_db_error(e)
+        return mappings
     for r in result.data:
         kw_raw = r.get('mapped_nt_keyword') or ''
         med_raw = r.get('mapped_nt_medium') or ''
@@ -197,18 +251,28 @@ def db_load_keyword_mappings(user_id):
 def db_save_keyword_mapping(user_id, ad_group_name, ad_type, medium_list, keyword_list):
     """매핑 1건 저장 (UPSERT). medium_list, keyword_list: 리스트."""
     sb = init_supabase()
-    sb.table('keyword_mappings').upsert({
-        'user_id': user_id,
-        'ad_group_name': ad_group_name,
-        'ad_type': ad_type,
-        'mapped_nt_medium': ','.join(medium_list) if medium_list else '',
-        'mapped_nt_keyword': ','.join(keyword_list) if keyword_list else '',
-    }, on_conflict='user_id,ad_group_name,ad_type').execute()
+    if sb is None:
+        return
+    try:
+        sb.table('keyword_mappings').upsert({
+            'user_id': user_id,
+            'ad_group_name': ad_group_name,
+            'ad_type': ad_type,
+            'mapped_nt_medium': ','.join(medium_list) if medium_list else '',
+            'mapped_nt_keyword': ','.join(keyword_list) if keyword_list else '',
+        }, on_conflict='user_id,ad_group_name,ad_type').execute()
+    except Exception as e:
+        _show_db_error(e)
 
 
 def db_delete_keyword_mapping(user_id, ad_group_name, ad_type):
     """키워드 매핑 삭제."""
     sb = init_supabase()
-    sb.table('keyword_mappings').delete().eq(
-        'user_id', user_id
-    ).eq('ad_group_name', ad_group_name).eq('ad_type', ad_type).execute()
+    if sb is None:
+        return
+    try:
+        sb.table('keyword_mappings').delete().eq(
+            'user_id', user_id
+        ).eq('ad_group_name', ad_group_name).eq('ad_type', ad_type).execute()
+    except Exception as e:
+        _show_db_error(e)

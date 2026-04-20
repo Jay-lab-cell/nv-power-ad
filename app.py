@@ -6,6 +6,7 @@ from datetime import date, timedelta, datetime
 
 from db import (get_user_id, db_save_weekly, db_load_history, db_update_memo, db_set_memo,
                 db_load_keyword_mappings, db_save_keyword_mapping, db_delete_keyword_mapping)
+from naver_sa_api import fetch_ad_data
 
 st.set_page_config(page_title="네이버 광고 ROAS 분석", layout="wide")
 st.title("네이버 파워링크 & 파워컨텐츠 ROAS 분석")
@@ -603,14 +604,69 @@ with st.container(border=True):
     with col_roas:
         target_roas = st.number_input("목표 ROAS(%)", min_value=0, value=150, step=10)
 
-uploaded_files = st.file_uploader(
-    "파일을 드래그하여 한번에 업로드 (파워컨텐츠 + 파워링크 + 전환 리포트)",
-    type=["xlsx", "csv"],
-    accept_multiple_files=True
+data_source = st.radio(
+    "데이터 소스",
+    ["🔄 API 자동 (네이버 검색광고)", "📂 엑셀 업로드"],
+    horizontal=True,
+    key="data_source",
 )
 
-if uploaded_files and len(uploaded_files) >= 1:
-    conv_df, power_ad_df, powerlink_df, match_info = classify_files(uploaded_files)
+conv_df = None
+power_ad_df = None
+powerlink_df = None
+match_info = {}
+
+if data_source.startswith("🔄"):
+    # ── API 모드 ──
+    col_btn, col_info = st.columns([1, 3])
+    with col_btn:
+        refresh = st.button("🔄 광고데이터 새로고침")
+    with col_info:
+        st.caption(f"기간: {start_date} ~ {end_date} (광고결과만 자동, 전환 리포트는 아래 업로드)")
+
+    cache_key = (start_date.isoformat(), end_date.isoformat())
+    if 'api_ad_cache' not in st.session_state:
+        st.session_state['api_ad_cache'] = {}
+
+    if refresh or cache_key in st.session_state['api_ad_cache']:
+        if refresh or cache_key not in st.session_state['api_ad_cache']:
+            try:
+                with st.spinner("네이버 검색광고 API 호출 중..."):
+                    pl_df, pc_df = fetch_ad_data(start_date, end_date)
+                st.session_state['api_ad_cache'][cache_key] = (pl_df, pc_df)
+            except Exception as e:
+                st.error(f"❌ API 호출 실패: {e}")
+                st.caption("💡 .env의 NAVER_SA_* 값을 확인하거나, '엑셀 업로드' 모드로 전환하세요.")
+                st.stop()
+        powerlink_df, power_ad_df = st.session_state['api_ad_cache'][cache_key]
+        cols = st.columns(2)
+        with cols[0]:
+            st.success(f"✅ 파워링크: {len(powerlink_df)}개 광고그룹")
+        with cols[1]:
+            st.success(f"✅ 파워컨텐츠: {len(power_ad_df)}개 광고그룹")
+        match_info = {'파워링크': 'API', '파워컨텐츠': 'API'}
+
+    conv_files = st.file_uploader(
+        "전환 리포트 업로드 (1개)",
+        type=["xlsx", "csv"],
+        accept_multiple_files=False,
+        key="api_conv_upload",
+    )
+    if conv_files is not None:
+        conv_df = load_file(conv_files)
+        match_info['전환 리포트'] = conv_files.name
+
+    uploaded_files = [conv_files] if conv_files else []
+else:
+    uploaded_files = st.file_uploader(
+        "파일을 드래그하여 한번에 업로드 (파워컨텐츠 + 파워링크 + 전환 리포트)",
+        type=["xlsx", "csv"],
+        accept_multiple_files=True
+    )
+    if uploaded_files:
+        conv_df, power_ad_df, powerlink_df, match_info = classify_files(uploaded_files)
+
+if (powerlink_df is not None) or (power_ad_df is not None) or (uploaded_files and len(uploaded_files) >= 1):
 
     # 식별된 파일 표시
     detected_labels = [l for l in ['전환 리포트', '파워컨텐츠', '파워링크'] if match_info.get(l)]
