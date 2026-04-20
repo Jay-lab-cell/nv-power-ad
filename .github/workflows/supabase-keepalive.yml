@@ -2,8 +2,8 @@ name: Supabase Keep-Alive
 
 on:
   schedule:
-    # 매일 KST 09:00 (UTC 00:00)
-    - cron: '0 0 * * *'
+    # 6일마다 KST 09:00 (UTC 00:00) — 매월 1,7,13,19,25,31일
+    - cron: '0 0 */6 * *'
   workflow_dispatch:
 
 jobs:
