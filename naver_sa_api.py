@@ -33,12 +33,39 @@ def _current_user_id():
 def _load_credentials():
     """st.secrets 우선 (user_id별 분기 지원), 없으면 ~/.claude/.env에서 로드."""
     uid = _current_user_id()
+
+    def _pick(sec):
+        try:
+            ak, sk, cid = sec["api_key"], sec["secret_key"], str(sec["customer_id"])
+            if ak and sk and cid:
+                return ak, sk, cid
+        except Exception:
+            pass
+        return None
+
     try:
         sec_root = st.secrets["naver_sa"]
-        if uid and uid in sec_root:
-            sec = sec_root[uid]
-            return sec["api_key"], sec["secret_key"], str(sec["customer_id"])
-        return sec_root["api_key"], sec_root["secret_key"], str(sec_root["customer_id"])
+        # 1) uid 서브섹션
+        if uid:
+            try:
+                sub = sec_root[uid]
+                got = _pick(sub)
+                if got:
+                    return got
+            except Exception:
+                pass
+        # 2) 루트 섹션의 직접 키 (기본값)
+        got = _pick(sec_root)
+        if got:
+            return got
+        # 3) 아무 서브섹션이나 (최후 폴백)
+        for k in list(sec_root.keys()):
+            try:
+                got = _pick(sec_root[k])
+                if got:
+                    return got
+            except Exception:
+                continue
     except Exception:
         pass
 
