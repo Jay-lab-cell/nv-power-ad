@@ -2,8 +2,8 @@ name: Supabase Keep-Alive
 
 on:
   schedule:
-    # 6일마다 KST 09:00 (UTC 00:00) — 매월 1,7,13,19,25,31일
-    - cron: '0 0 */6 * *'
+    # 매주 월·목 KST 09:00 (UTC 00:00) — 간격 3~4일로 free tier pause 방지
+    - cron: '0 0 * * 1,4'
   workflow_dispatch:
 
 jobs:
@@ -25,4 +25,26 @@ jobs:
             exit 1
           fi
           psql -v ON_ERROR_STOP=1 -c "SELECT 1 AS alive;"
-          echo "✅ Supabase alive"
+          echo "Postgres alive"
+
+      - name: Ping Supabase REST (PostgREST)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          set -e
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_ANON_KEY" ]; then
+            echo "::error::SUPABASE_URL / SUPABASE_ANON_KEY secrets가 설정되지 않았습니다."
+            exit 1
+          fi
+          status=$(curl -s -o /tmp/resp.txt -w "%{http_code}" \
+            "$SUPABASE_URL/rest/v1/weekly_history?select=id&limit=1" \
+            -H "apikey: $SUPABASE_ANON_KEY" \
+            -H "Authorization: Bearer $SUPABASE_ANON_KEY")
+          echo "HTTP $status"
+          head -c 500 /tmp/resp.txt; echo
+          if [ "$status" != "200" ]; then
+            echo "::error::REST ping 실패 ($status)"
+            exit 1
+          fi
+          echo "REST alive"
